@@ -1,0 +1,75 @@
+# MMFakeBench Dataset Configuration
+# Multimodal Fake News Benchmark
+
+dataset:
+  name: "MMFakeBench"
+  data_root: "data"
+  modality: "multimodal"
+
+  train_split: "train"
+  val_split: "val"
+  test_split: "test"
+
+  has_text: true
+  has_image: true
+  has_ocr: false
+  use_ocr: false
+
+  max_text_length: 256  # Shorter captions
+  image_size: 224
+
+model:
+  type: "multimodal"
+  num_classes: 2
+
+  text_encoder: "bert-base-uncased"
+  text_hidden_size: 768
+  text_max_length: 256
+
+  image_encoder: "resnet50"
+  image_hidden_size: 2048
+  image_pretrained: true
+
+  fusion_method: "attention"  # Attention-based fusion
+  fusion_hidden_size: 512
+  dropout: 0.2
+
+training:
+  optimizer: "adamw"
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+
+  scheduler: "linear_warmup"
+  warmup_ratio: 0.1
+
+  num_epochs: 20  # Small dataset, more epochs
+  batch_size: 8   # Very small dataset
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0
+
+  mixed_precision: true
+
+  loss_fn: "cross_entropy"
+  label_smoothing: 0.0
+
+  early_stopping: true
+  patience: 5
+  metric: "f1_macro"
+
+experiment:
+  name: "mmfakebench_multimodal_detection"
+  seed: 42
+  device: "cuda"
+  num_workers: 2
+
+  output_dir: "outputs/mmfakebench"
+  checkpoint_dir: "checkpoints/mmfakebench"
+  log_dir: "logs/mmfakebench"
+
+  log_interval: 50
+  eval_interval: 200
+  save_interval: 500
+  save_total_limit: 3
+
+  eval_on_test: true
+  compute_metrics_per_dataset: false

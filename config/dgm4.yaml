@@ -1,0 +1,81 @@
+# DGM4 Dataset Configuration
+# DeepFake Generation Methods - Multimodal dataset
+
+dataset:
+  name: "DGM4"
+  data_root: "data"
+  modality: "multimodal"
+
+  # Data splits
+  train_split: "train"
+  val_split: "val"
+  test_split: "test"
+
+  # Data properties
+  has_text: true
+  has_image: true
+  has_ocr: false
+  use_ocr: false
+
+  # Preprocessing
+  max_text_length: 256
+  image_size: 224
+
+model:
+  type: "multimodal"
+  num_classes: 2
+
+  # Text encoder
+  text_encoder: "bert-base-uncased"
+  text_hidden_size: 768
+  text_max_length: 256
+
+  # Image encoder
+  image_encoder: "resnet50"  # resnet50, vit-base-patch16-224
+  image_hidden_size: 2048
+  image_pretrained: true
+
+  # Fusion
+  fusion_method: "concat"  # concat, attention, cross_attention
+  fusion_hidden_size: 512
+  dropout: 0.3
+
+training:
+  optimizer: "adamw"
+  learning_rate: 1.0e-5
+  weight_decay: 0.01
+
+  scheduler: "linear_warmup"
+  warmup_ratio: 0.1
+
+  num_epochs: 15
+  batch_size: 16  # Smaller due to images
+  gradient_accumulation_steps: 2
+  max_grad_norm: 1.0
+
+  mixed_precision: true
+
+  loss_fn: "cross_entropy"
+  label_smoothing: 0.0
+
+  early_stopping: true
+  patience: 5
+  metric: "f1_macro"
+
+experiment:
+  name: "dgm4_multimodal_detection"
+  seed: 42
+  device: "cuda"
+  num_workers: 4
+
+  output_dir: "outputs/dgm4"
+  checkpoint_dir: "checkpoints/dgm4"
+  log_dir: "logs/dgm4"
+
+  log_interval: 100
+  eval_interval: 500
+  save_interval: 1000
+  save_total_limit: 3
+
+  eval_on_test: true
+  compute_metrics_per_dataset: false

@@ -1,0 +1,196 @@
+# Master Configuration File
+# This is the default configuration loaded by the system.
+# Dataset-specific configs (amg.yaml, dgm4.yaml, etc.) will override these settings.
+
+# ============================================================================
+# Dataset Selection
+# ============================================================================
+dataset:
+  # Primary dataset for training/testing
+  name: "AMG"  # AMG, DGM4, FineFake, MMFakeBench, MR2
+
+  # Cross-dataset testing configuration
+  same_dataset: true  # If true, train and test on same dataset
+  test_dataset: null  # If same_dataset=false, specify test dataset here
+
+  # Example for cross-dataset:
+  # same_dataset: false
+  # name: "AMG"           # Training dataset
+  # test_dataset: "DGM4"  # Testing dataset
+
+  # Data root and splits
+  data_root: "data"
+  train_split: "train"
+  val_split: "val"
+  test_split: "test"
+
+  # Data properties (will be overridden by dataset-specific configs)
+  modality: "multimodal"  # text, image, multimodal
+  has_text: true
+  has_image: true
+  has_ocr: false
+  use_ocr: false
+
+  # Preprocessing
+  max_text_length: 512
+  image_size: 224
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+model:
+  type: "multimodal"  # text, image, multimodal
+  num_classes: 2  # 2 for binary, 3 for MR2
+
+  # Text encoder settings
+  text_encoder: "bert-base-uncased"
+  text_hidden_size: 768
+  text_max_length: 512
+  text_freeze_encoder: false  # Freeze pretrained weights
+
+  # Image encoder settings
+  image_encoder: "resnet50"  # resnet50, resnet101, vit-base-patch16-224
+  image_hidden_size: 2048
+  image_pretrained: true
+  image_freeze_encoder: false
+
+  # Fusion settings (for multimodal)
+  fusion_method: "concat"  # concat, attention, cross_attention, gated
+  fusion_hidden_sizes: [512, 256]  # Hidden layers after fusion
+
+  # Classifier settings
+  dropout: 0.3
+  activation: "relu"  # relu, gelu, tanh
+
+# ============================================================================
+# Training Configuration
+# ============================================================================
+training:
+  # Optimizer
+  optimizer: "adamw"  # adamw, adam, sgd
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  adam_epsilon: 1.0e-8
+  adam_betas: [0.9, 0.999]
+
+  # Learning rate scheduler
+  scheduler: "linear_warmup"  # linear_warmup, cosine, constant, step
+  warmup_ratio: 0.1  # Warmup steps = total_steps * warmup_ratio
+  warmup_steps: null  # If set, overrides warmup_ratio
+
+  # Training parameters
+  num_epochs: 10
+  batch_size: 32
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0  # Gradient clipping
+
+  # Mixed precision training
+  mixed_precision: true  # Use automatic mixed precision (AMP)
+
+  # Loss function
+  loss_fn: "cross_entropy"  # cross_entropy, focal_loss, label_smoothing_ce
+  label_smoothing: 0.0  # 0.0 = no smoothing, 0.1 = smooth labels
+  focal_loss_alpha: 0.25  # For focal loss
+  focal_loss_gamma: 2.0   # For focal loss
+
+  # Class weights (for imbalanced data)
+  use_class_weights: false
+  class_weights: null  # [weight_for_class_0, weight_for_class_1, ...]
+
+  # Early stopping
+  early_stopping: true
+  patience: 3  # Stop if no improvement for N epochs
+  metric: "f1_macro"  # Metric to monitor: accuracy, f1_macro, f1_weighted, loss
+  mode: "max"  # max (for accuracy/f1) or min (for loss)
+
+  # Regularization
+  dropout_rate: 0.3
+  weight_decay: 0.01
+
+# ============================================================================
+# Experiment Configuration
+# ============================================================================
+experiment:
+  # Experiment naming
+  name: "rumor_detection"
+  notes: ""  # Additional notes about the experiment
+
+  # Random seed for reproducibility
+  seed: 42
+
+  # Device settings
+  device: "cuda"  # cuda, cpu, cuda:0, cuda:1, etc.
+  num_workers: 4  # DataLoader workers
+  pin_memory: true  # Pin memory for faster GPU transfer
+
+  # Output directories
+  output_dir: "outputs"
+  checkpoint_dir: "checkpoints"
+  log_dir: "logs"
+
+  # Logging intervals (in steps)
+  log_interval: 100      # Log training metrics every N steps
+  eval_interval: 500     # Run validation every N steps
+  save_interval: 1000    # Save checkpoint every N steps
+
+  # Checkpointing
+  save_total_limit: 3    # Keep only N best checkpoints
+  save_best_only: true   # Only save checkpoints that improve the metric
+  resume_from_checkpoint: null  # Path to checkpoint to resume from
+
+  # Evaluation
+  eval_on_test: true     # Evaluate on test set after training
+  eval_on_train: false   # Also evaluate on training set (for debugging)
+  compute_metrics_per_dataset: false  # Compute metrics per dataset (for multi-dataset)
+
+  # Visualization
+  plot_training_curves: true   # Plot loss/metrics curves
+  save_predictions: true       # Save predictions to file
+  save_confusion_matrix: true  # Save confusion matrix
+
+  # Logging backends
+  use_tensorboard: true   # Log to TensorBoard
+  use_wandb: false        # Log to Weights & Biases
+  wandb_project: "rumor-detection"
+  wandb_entity: null      # Your W&B username/team
+
+# ============================================================================
+# Data Augmentation (Optional)
+# ============================================================================
+augmentation:
+  # Text augmentation
+  text_augmentation: false
+  text_aug_methods: []  # ["synonym_replacement", "random_deletion", "back_translation"]
+  text_aug_probability: 0.3
+
+  # Image augmentation (for training only)
+  image_augmentation: true
+  image_aug_methods:
+    - random_horizontal_flip: 0.5
+    - random_rotation: 15
+    - color_jitter:
+        brightness: 0.2
+        contrast: 0.2
+        saturation: 0.2
+
+# ============================================================================
+# Advanced Settings
+# ============================================================================
+advanced:
+  # Distributed training
+  distributed: false
+  local_rank: -1
+  world_size: 1
+
+  # Debugging
+  debug_mode: false
+  overfit_batches: 0  # Train on N batches only (for debugging)
+  fast_dev_run: false  # Run 1 batch of train/val/test
+
+  # Performance
+  dataloader_prefetch_factor: 2
+  compile_model: false  # Use torch.compile (PyTorch 2.0+)
+
+  # Reproducibility
+  deterministic: true
+  benchmark: false  # Set to true for better performance if input size is fixed
