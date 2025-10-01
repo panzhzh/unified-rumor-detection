@@ -142,11 +142,11 @@ class EvidenceFusionModel(nn.Module):
             # Multiple images: first is main, rest are evidence
             image_hidden, image_pooled = self.image_encoder(pixel_values)
             # image_hidden: [batch_size, num_images, num_patches, hidden_dim]
-            main_image_features = image_hidden[:, 0]  # [batch_size, num_patches, hidden_dim]
+            main_image_features = image_hidden[:, 0, :, :]  # [batch_size, num_patches, hidden_dim]
 
             if self.use_evidence and image_hidden.shape[1] > 1:
                 # Extract evidence features: [batch_size, num_evidence, num_patches, hidden_dim]
-                evidence_features = image_hidden[:, 1:]
+                evidence_features = image_hidden[:, 1:, :, :]
                 # Use CLS token: [batch_size, num_evidence, hidden_dim]
                 evidence_cls = evidence_features[:, :, 0, :]
 
@@ -178,8 +178,8 @@ class EvidenceFusionModel(nn.Module):
                 main_image_features, evidence_image_features = fusion_layer(main_image_features, evidence_image_features)
 
         # Pool to single representations
-        text_pooled = text_hidden[:, 0]  # CLS token
-        main_pooled = main_image_features[:, 0]  # CLS token
+        text_pooled = text_hidden[:, 0, :]  # CLS token
+        main_pooled = main_image_features[:, 0, :]  # CLS token
 
         # Apply pooling layers
         text_pooled = torch.tanh(self.text_pooler(text_pooled))
@@ -187,7 +187,7 @@ class EvidenceFusionModel(nn.Module):
 
         # Fuse features
         if self.use_evidence and evidence_image_features is not None:
-            evidence_pooled = evidence_image_features[:, 0]
+            evidence_pooled = evidence_image_features[:, 0, :]
             evidence_pooled = torch.tanh(self.evidence_pooler(evidence_pooled))
             fused_features = torch.cat([text_pooled, main_pooled, evidence_pooled], dim=1)
         elif self.use_evidence:
@@ -225,6 +225,10 @@ class EvidenceFusionModel(nn.Module):
 
         # Encode caption as query
         caption_query = self._encode_caption(caption)  # [batch_size, hidden_dim]
+
+        # Handle None caption (use zero vector as fallback)
+        if caption_query is None:
+            caption_query = torch.zeros(batch_size, self.hidden_dim, device=evidence_features.device)
 
         # Attention pooling
         pooled_evidence, attention_weights = self.evidence_attention(
@@ -272,8 +276,13 @@ class EvidenceFusionModel(nn.Module):
 
     def _encode_caption(self, caption):
         """Encode caption strings as query vectors."""
-        if caption is None or not hasattr(self, 'caption_tokenizer'):
-            # Fallback
+        # Check for None first before trying to get len()
+        if caption is None:
+            # Return None to signal caller to use fallback
+            return None
+
+        if not hasattr(self, 'caption_tokenizer'):
+            # Fallback - now safe to use len()
             batch_size = 1 if isinstance(caption, str) else len(caption)
             return torch.zeros(batch_size, self.hidden_dim, device=next(self.parameters()).device)
 

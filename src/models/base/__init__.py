@@ -6,11 +6,12 @@ different papers and experiments.
 """
 
 from .encoders import TextEncoder, ImageEncoder
-from .attention import CrossModalAttention, DeepFusionLayer
+from .attention import CrossModalAttention, DeepFusionLayer, EvidenceAttentionPooling
 
 __all__ = [
     'TextEncoder',
     'ImageEncoder',
     'CrossModalAttention',
-    'DeepFusionLayer'
+    'DeepFusionLayer',
+    'EvidenceAttentionPooling'
 ]
