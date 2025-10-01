@@ -5,74 +5,54 @@ A unified framework for multimodal rumor/fake news detection that supports multi
 ## Features
 
 - **Unified Data Format**: Standardized data structure across 5+ public datasets
-- **Flexible Training Modes**:
-  - Single dataset training
-  - Multi-dataset joint training
-  - Cross-dataset generalization testing
+- **Flexible Training Modes**: Single dataset, multi-dataset joint training, cross-dataset evaluation
 - **Multimodal Support**: Text, Image, and Text+Image models
-- **Multiple Datasets**:
-  - AMG (Aligned Multimodal Graph)
-  - DGM4 (DeepFake Generation Methods)
-  - FineFake (Fine-grained Fake News)
-  - MMFakeBench (Multimodal Fake Benchmark)
-  - MR2 (Multimodal Rumor Recognition)
+- **Modular Architecture**: Reusable base components and isolated experiment models
+
+## Supported Datasets
+
+| Dataset | Modality | Language | Size | Label Type |
+|---------|----------|----------|------|------------|
+| AMG | Text | EN | ~50K | Fine-grained (0-5) |
+| DGM4 | Text+Image | EN | ~20K | Binary |
+| FineFake | Text+Image | EN | ~30K | Binary + Fine-grained |
+| MMFakeBench | Text+Image | EN | ~1K | Binary |
+| MR2 | Text+Image+OCR | ZH/EN | ~10K | Ternary (0/1/2) |
+
+## Installation
+
+```bash
+# Install dependencies
+pip install torch torchvision transformers
+pip install scikit-learn pandas numpy pillow
+```
 
 ## Project Structure
 
 ```
 unified-rumor-detection/
-├── data/                       # Raw datasets
+├── data/                       # Raw datasets and features
 │   ├── AMG/
 │   ├── DGM4/
 │   ├── FineFake/
 │   ├── MMFakeBench/
-│   └── MR2/
-│
-├── config/                     # YAML configuration files only
-│   ├── config.yaml             # Master configuration
-│   ├── amg.yaml                # AMG dataset config
-│   ├── dgm4.yaml               # DGM4 dataset config
-│   ├── finefake.yaml           # FineFake dataset config
-│   ├── mmfakebench.yaml        # MMFakeBench dataset config
-│   └── mr2.yaml                # MR2 dataset config
+│   ├── MR2/
+│   └── features/               # Pre-computed features
 │
 ├── src/
-│   ├── data/                   # Data loading
-│   │   ├── data_loader.py      # Unified data loader
-│   │   └── dataset.py          # PyTorch datasets
-│   │
-│   ├── models/                 # Model architectures
-│   │   ├── base_model.py       # Base model interface
-│   │   ├── text_models.py      # Text-only models (TODO)
-│   │   ├── image_models.py     # Image-only models (TODO)
-│   │   └── multimodal_models.py # Multimodal fusion models (TODO)
-│   │
-│   ├── training/               # Training logic
-│   │   ├── trainer.py          # Training loop (TODO)
-│   │   └── evaluator.py        # Evaluation (TODO)
-│   │
-│   ├── config/                 # Configuration utilities
-│   │   └── config_loader.py    # Config loading logic
-│   │
-│   └── utils/                  # Utilities
-│       └── metrics.py          # Evaluation metrics
+│   ├── data/                   # Unified data loading
+│   ├── preprocessing/          # Text processing utilities
+│   └── models/
+│       ├── base/               # Reusable components (encoders, attention)
+│       └── experiments/        # Paper-specific models
 │
-├── checkpoints/                # Model checkpoints (created at runtime)
-├── outputs/                    # Experiment outputs (created at runtime)
-└── logs/                       # Training logs (created at runtime)
-```
-
-## Installation
-
-```bash
-# Clone the repository
-git clone <repo-url>
-cd unified-rumor-detection
-
-# Install dependencies
-pip install torch torchvision transformers
-pip install scikit-learn pandas numpy pillow
-pip install tensorboard wandb  # Optional for logging
+├── scripts/
+│   ├── ocr/                    # OCR extraction
+│   └── features/               # Feature extraction
+│
+├── configs/                    # YAML configurations
+├── results/                    # Experiment results
+└── README.md
 ```
 
 ## Quick Start
@@ -82,165 +62,90 @@ pip install tensorboard wandb  # Optional for logging
 ```python
 from src.data import UnifiedDataLoader
 
-# Initialize loader
 loader = UnifiedDataLoader(data_root="data")
-
-# Load single dataset
 amg_data = loader.load_dataset("AMG", split="train")
-
-# Load multiple datasets
-multi_data = loader.load_multiple(["AMG", "DGM4"], split="train")
-
-# Load only multimodal data
-multimodal_data = loader.load_by_modality(
-    split="train",
-    require_text=True,
-    require_image=True
-)
 ```
 
-### 2. Create PyTorch Dataset
+### 2. Extract Features
+
+```bash
+# Extract image features
+python scripts/features/extract_image_features.py --model clip_large
+
+# Extract OCR text
+python scripts/ocr/extract_ocr.py --dataset MR2
+```
+
+### 3. Use Base Components
 
 ```python
-from src.data.dataset import create_dataset
-from transformers import BertTokenizer
+from src.models.base import TextEncoder, ImageEncoder, DeepFusionLayer
 
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-
-# Create multimodal dataset
-dataset = create_dataset(
-    data=multi_data,
-    mode='multimodal',
-    text_tokenizer=tokenizer
-)
+text_encoder = TextEncoder()
+image_encoder = ImageEncoder()
+fusion_layer = DeepFusionLayer()
 ```
 
-### 3. Load Configuration
+## Data Format
 
-```python
-from src.config import load_dataset_config
-
-# Load configuration for a dataset
-config = load_dataset_config("AMG")
-
-# Access config values using dot notation
-print(config.dataset.name)           # "AMG"
-print(config.model.text_encoder)     # "bert-base-uncased"
-print(config.training.batch_size)    # 32
-print(config.experiment.device)      # "cuda"
-
-# Modify config as needed
-config.training.num_epochs = 20
-config.training.batch_size = 64
-```
-
-### 4. Train Model (TODO)
-
-```python
-# Training implementation coming soon
-# from src.training import Trainer
-#
-# trainer = Trainer(model, config)
-# trainer.train()
-```
-
-## Unified Data Format
-
-All datasets are converted to a unified format:
+All datasets use a unified format:
 
 ```python
 @dataclass
 class UnifiedDataItem:
-    # Core fields (always present)
     id: str                      # Unique identifier
     label: int                   # 0=real, 1=fake, 2=unverified
     dataset_name: str            # Source dataset
     split: str                   # train/val/test
-
-    # Content fields (may be None)
     text: str                    # Main text content
     image_path: str              # Path to image
     ocr: str                     # OCR text from image
-    entities: List[str]          # Named entities
-    timestamp: float             # Publication time
-    author: str                  # Author/source
-    language: str                # Language code
-
-    # Extended fields
     metadata: Dict               # Dataset-specific info
 ```
 
-## Label Convention
+**Label Convention**:
+- 0: Real/True/Non-rumor
+- 1: Fake/False/Rumor
+- 2: Unverified (MR2 only)
 
-All datasets use unified labels:
-- **0**: Real/True/Non-rumor
-- **1**: Fake/False/Rumor
-- **2**: Unverified (MR2 only)
+## Adding New Experiments
 
-Original labels are preserved in `metadata` for reference.
+### Step 1: Create Model
 
-## Supported Datasets
-
-| Dataset | Modality | Language | Size | Label Type |
-|---------|----------|----------|------|------------|
-| AMG | Text | EN | ~50K | Fine-grained (0-5) |
-| DGM4 | Text+Image | EN | ~20K | Binary (original/manipulated) |
-| FineFake | Text+Image | EN | ~30K | Binary + Fine-grained |
-| MMFakeBench | Text+Image | EN | ~1K | Binary |
-| MR2 | Text+Image+OCR | ZH/EN | ~10K | Ternary (0/1/2) |
-
-## Experiment Modes
-
-### 1. Single Dataset Training
-Train and test on the same dataset:
 ```python
-config = get_single_dataset_config("AMG")
+# src/models/experiments/my_paper/model.py
+from ...base import TextEncoder, ImageEncoder, DeepFusionLayer
+
+class MyPaperModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.text_encoder = TextEncoder()
+        self.image_encoder = ImageEncoder()
+        self.fusion = DeepFusionLayer()
 ```
 
-### 2. Multi-Dataset Training
-Train on multiple datasets jointly:
-```python
-config = get_multi_dataset_config(["AMG", "DGM4", "FineFake"])
+### Step 2: Create Config
+
+```yaml
+# configs/experiments/my_paper.yaml
+model:
+  name: "MyPaperModel"
+  num_classes: 2
+
+data:
+  datasets: ["AMG", "MR2"]
+  batch_size: 32
+
+training:
+  epochs: 20
+  lr: 1e-4
 ```
 
-### 3. Cross-Dataset Evaluation
-Train on source datasets, test on target:
-```python
-config = get_cross_dataset_config(
-    source_datasets=["AMG", "DGM4"],
-    target_dataset="MMFakeBench"
-)
+### Step 3: Run
+
+```bash
+python scripts/experiments/run_my_paper.py --config configs/experiments/my_paper.yaml
 ```
-
-## Evaluation Metrics
-
-- Accuracy
-- Precision (macro/weighted/per-class)
-- Recall (macro/weighted/per-class)
-- F1-score (macro/weighted/per-class)
-- AUC-ROC (binary classification)
-- Confusion Matrix
-- Per-dataset metrics (for multi-dataset evaluation)
-
-## TODO
-
-- [ ] Implement text-only models (BERT, RoBERTa)
-- [ ] Implement image-only models (ResNet, ViT)
-- [ ] Implement multimodal fusion models (CLIP, ViLT, etc.)
-- [ ] Implement trainer and evaluator
-- [ ] Add visualization tools
-- [ ] Add experiment scripts
-- [ ] Add pre-trained model zoo
-- [ ] Add detailed tutorials
-
-## Citation
-
-If you use this framework, please cite the original dataset papers:
-- AMG: [Paper Link]
-- DGM4: [Paper Link]
-- FineFake: [Paper Link]
-- MMFakeBench: [Paper Link]
-- MR2: [Paper Link]
 
 ## License
 

@@ -51,6 +51,7 @@ outputs/
 logs/
 runs/
 wandb/
+results/
 *.pth
 *.ckpt
 *.safetensors
