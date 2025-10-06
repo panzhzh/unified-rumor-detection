@@ -31,8 +31,8 @@ class EvidenceFusionModel(nn.Module):
     def __init__(
         self,
         num_classes: int = 2,
-        text_model_name: str = "xlm-roberta-large",
-        image_model_name: str = "openai/clip-vit-large-patch14",
+        text_model_name: str = "xlm-roberta-base",
+        image_model_name: str = "openai/clip-vit-base-patch16",
         num_fusion_layers: int = 3,
         use_evidence: bool = True,
         dropout: float = 0.1
@@ -40,7 +40,7 @@ class EvidenceFusionModel(nn.Module):
         super().__init__()
         self.num_classes = num_classes
         self.use_evidence = use_evidence
-        self.hidden_dim = 1024  # Assuming large models
+        self.hidden_dim = 768  # clip-vit-base-patch16 uses 768
 
         # Encoders
         self.text_encoder = TextEncoder(text_model_name, freeze=False)
@@ -49,6 +49,22 @@ class EvidenceFusionModel(nn.Module):
             freeze_backbone=True,
             use_trainable_adapter=True
         )
+
+        # Projection layers to align dimensions
+        text_dim = self.text_encoder.hidden_size  # 1024 for xlm-roberta-large
+        image_dim = self.image_encoder.hidden_size  # 768 for clip-vit-base-patch16
+
+        # Project text to common dimension
+        if text_dim != self.hidden_dim:
+            self.text_projection = nn.Linear(text_dim, self.hidden_dim)
+        else:
+            self.text_projection = nn.Identity()
+
+        # Project image to common dimension
+        if image_dim != self.hidden_dim:
+            self.image_projection = nn.Linear(image_dim, self.hidden_dim)
+        else:
+            self.image_projection = nn.Identity()
 
         # Multi-layer cross-modal fusion
         self.num_fusion_layers = num_fusion_layers
@@ -129,19 +145,33 @@ class EvidenceFusionModel(nn.Module):
         """
         # Encode text - use full sequence
         text_hidden, text_cls = self.text_encoder(input_ids, attention_mask)
+        # text_hidden: [batch_size, seq_len, text_dim]
+
+        # Project text to common dimension
+        text_hidden = self.text_projection(text_hidden)
         # text_hidden: [batch_size, seq_len, hidden_dim]
 
         # Encode images
         if pixel_values.dim() == 4:
             # Single image per sample
             image_hidden, image_pooled = self.image_encoder(pixel_values)
-            # image_hidden: [batch_size, num_patches, hidden_dim]
-            main_image_features = image_hidden
+            # image_hidden: [batch_size, num_patches, image_dim]
+
+            # Project image to common dimension
+            main_image_features = self.image_projection(image_hidden)
+            # main_image_features: [batch_size, num_patches, hidden_dim]
             evidence_image_features = None
         else:
             # Multiple images: first is main, rest are evidence
             image_hidden, image_pooled = self.image_encoder(pixel_values)
-            # image_hidden: [batch_size, num_images, num_patches, hidden_dim]
+            # image_hidden: [batch_size, num_images, num_patches, image_dim]
+
+            # Project all images to common dimension
+            batch_size, num_images, num_patches, _ = image_hidden.shape
+            image_hidden_flat = image_hidden.view(batch_size * num_images, num_patches, -1)
+            image_hidden_projected = self.image_projection(image_hidden_flat)
+            image_hidden = image_hidden_projected.view(batch_size, num_images, num_patches, self.hidden_dim)
+
             main_image_features = image_hidden[:, 0, :, :]  # [batch_size, num_patches, hidden_dim]
 
             if self.use_evidence and image_hidden.shape[1] > 1:
@@ -256,7 +286,7 @@ class EvidenceFusionModel(nn.Module):
 
         # Create patch-level features (expand pooled evidence to patch format)
         # For simplicity, we replicate the pooled feature across patches
-        num_patches = 257  # CLIP ViT-L has 257 patches (16x16 + 1 CLS)
+        num_patches = 197  # CLIP ViT-B/16 has 197 patches (14x14 + 1 CLS)
         evidence_patch_features = pooled_evidence.unsqueeze(1).expand(-1, num_patches, -1)
 
         # Apply gate

@@ -180,7 +180,7 @@ class DGM4Loader(BaseDatasetLoader):
         unified_data = []
         for idx, item in enumerate(raw_data):
             # DGM4: original images are real (0), manipulated are fake (1)
-            label = 0 if item['fake_cls'] == 'original' else 1
+            label = 0 if item['fake_cls'] == 'orig' else 1
 
             # Use original ID (IDs are unique across all splits)
             item_id = str(item['id'])
