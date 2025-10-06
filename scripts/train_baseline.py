@@ -17,6 +17,7 @@ from torch.amp import autocast, GradScaler
 from transformers import XLMRobertaTokenizer
 from tqdm import tqdm
 import json
+import yaml
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -24,7 +25,7 @@ sys.path.insert(0, str(project_root))
 
 from src.data import UnifiedDataLoader
 from src.data.dataset import MultimodalDataset
-from src.models.experiments.evidence_fusion import EvidenceFusionModel
+from src.models import MultimodalModel
 from src.utils.metrics import compute_metrics
 
 
@@ -37,6 +38,17 @@ def set_seed(seed: int = 42):
     if torch.backends.cudnn.is_available():
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+
+
+def load_config(config_path="config/config.yaml"):
+    """Load configuration from YAML file"""
+    if not Path(config_path).exists():
+        print(f"Warning: Config file {config_path} not found, using command-line defaults")
+        return None
+
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config
 
 
 def parse_args():
@@ -60,19 +72,31 @@ def parse_args():
                        help="Image encoder model name")
     parser.add_argument("--num_fusion_layers", type=int, default=3,
                        help="Number of fusion layers")
+    parser.add_argument("--num_heads", type=int, default=8,
+                       help="Number of attention heads in fusion layers")
     parser.add_argument("--use_evidence", action="store_true",
                        help="Enable evidence image fusion")
-    parser.add_argument("--dropout", type=float, default=0.1,
+    parser.add_argument("--caption_max_length", type=int, default=128,
+                       help="Max length for evidence captions")
+    parser.add_argument("--dropout", type=float, default=0.3,
                        help="Dropout rate")
+    parser.add_argument("--unfreeze_clip_layers", type=int, default=3,
+                       help="Number of CLIP layers to unfreeze from the end")
+    parser.add_argument("--hidden_dim", type=int, default=768,
+                       help="Hidden dimension for fusion")
+    parser.add_argument("--classifier_hidden_dim", type=int, default=512,
+                       help="Hidden dimension in final classifier")
 
     # Training
-    parser.add_argument("--num_epochs", type=int, default=10,
+    parser.add_argument("--num_epochs", type=int, default=8,
                        help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=16,
                        help="Batch size per GPU")
     parser.add_argument("--learning_rate", type=float, default=2e-5,
-                       help="Learning rate")
-    parser.add_argument("--weight_decay", type=float, default=0.01,
+                       help="Learning rate (for fusion and text layers)")
+    parser.add_argument("--clip_lr", type=float, default=1e-6,
+                       help="Learning rate for unfrozen CLIP layers")
+    parser.add_argument("--weight_decay", type=float, default=0.1,
                        help="Weight decay")
     parser.add_argument("--warmup_ratio", type=float, default=0.1,
                        help="Warmup ratio")
@@ -288,6 +312,81 @@ def evaluate(model, data_loader, criterion, device):
 def main():
     args = parse_args()
 
+    # Load config file (default: config/config.yaml)
+    config = load_config()
+    if config is not None:
+        print(f"Loading configuration from: config/config.yaml\n")
+
+        # Override args with config values (command-line args take precedence if explicitly set)
+        # Dataset
+        if args.dataset == "MR2":  # If using default, load from config
+            args.dataset = config['dataset']['name']
+        args.data_root = config['dataset']['data_root']
+        if args.language is None:
+            args.language = config['dataset']['language']
+        if not args.exclude_unverified:
+            args.exclude_unverified = config['dataset']['exclude_unverified']
+
+        # Model
+        if args.text_model == "xlm-roberta-base":
+            args.text_model = config['model']['text_model']
+        if args.image_model == "openai/clip-vit-base-patch16":
+            args.image_model = config['model']['image_model']
+        if args.hidden_dim == 768:
+            args.hidden_dim = config['model']['hidden_dim']
+        if args.num_fusion_layers == 3:
+            args.num_fusion_layers = config['model']['num_fusion_layers']
+        if args.num_heads == 8:
+            args.num_heads = config['model']['num_heads']
+        if not args.use_evidence:
+            args.use_evidence = config['model']['use_evidence']
+        if args.caption_max_length == 128:
+            args.caption_max_length = config['model']['caption_max_length']
+        if args.dropout == 0.3:
+            args.dropout = config['model']['dropout']
+        if args.unfreeze_clip_layers == 3:
+            args.unfreeze_clip_layers = config['model']['unfreeze_clip_layers']
+        if args.classifier_hidden_dim == 512:
+            args.classifier_hidden_dim = config['model']['classifier_hidden_dim']
+
+        # Training
+        if args.num_epochs == 8:
+            args.num_epochs = config['training']['num_epochs']
+        if args.batch_size == 16:
+            args.batch_size = config['training']['batch_size']
+        if args.learning_rate == 2e-5:
+            args.learning_rate = config['training']['learning_rate']
+        if args.clip_lr == 1e-6:
+            args.clip_lr = config['training']['clip_lr']
+        if args.weight_decay == 0.1:
+            args.weight_decay = config['training']['weight_decay']
+        if args.warmup_ratio == 0.1:
+            args.warmup_ratio = config['training']['warmup_ratio']
+        if args.max_grad_norm == 1.0:
+            args.max_grad_norm = config['training']['max_grad_norm']
+        if not args.mixed_precision:
+            args.mixed_precision = config['training']['mixed_precision']
+
+        # Experiment
+        if args.seed == 42:
+            args.seed = config['experiment']['seed']
+        if args.device == "cuda":
+            args.device = config['experiment']['device']
+        if args.num_workers == 4:
+            args.num_workers = config['experiment']['num_workers']
+        if args.pin_memory:
+            args.pin_memory = config['experiment']['pin_memory']
+        if args.prefetch_factor == 2:
+            args.prefetch_factor = config['experiment']['prefetch_factor']
+        if args.output_dir == "outputs":
+            args.output_dir = config['experiment']['output_dir']
+        if args.logging_steps == 50:
+            args.logging_steps = config['experiment']['logging_steps']
+        if args.eval_steps == 500:
+            args.eval_steps = config['experiment']['eval_steps']
+        if args.save_steps == 500:
+            args.save_steps = config['experiment']['save_steps']
+
     # Set seed
     set_seed(args.seed)
 
@@ -317,14 +416,20 @@ def main():
     print(f"  Image encoder: {args.image_model}")
     print(f"  Fusion layers: {args.num_fusion_layers}")
     print(f"  Number of classes: {num_classes}")
+    print(f"  CLIP unfrozen layers: last {args.unfreeze_clip_layers} layers")
 
-    model = EvidenceFusionModel(
+    model = MultimodalModel(
         num_classes=num_classes,
         text_model_name=args.text_model,
         image_model_name=args.image_model,
         num_fusion_layers=args.num_fusion_layers,
+        num_heads=args.num_heads,
         use_evidence=args.use_evidence,
-        dropout=args.dropout
+        caption_max_length=args.caption_max_length,
+        dropout=args.dropout,
+        unfreeze_clip_layers=args.unfreeze_clip_layers,
+        hidden_dim=args.hidden_dim,
+        classifier_hidden_dim=args.classifier_hidden_dim
     ).to(device)
 
     # Count parameters
@@ -333,12 +438,31 @@ def main():
     print(f"\nTotal parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
 
-    # Setup optimizer
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay
-    )
+    # Setup optimizer with layered learning rates
+    clip_params = []
+    other_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+
+        if 'image_encoder.clip.vision_model.encoder.layers' in name:
+            # Unfrozen CLIP layers
+            clip_params.append(param)
+        else:
+            # Fusion, text encoder, classifier
+            other_params.append(param)
+
+    param_groups = [
+        {'params': clip_params, 'lr': args.clip_lr},
+        {'params': other_params, 'lr': args.learning_rate}
+    ]
+
+    print(f"\nLayered learning rates:")
+    print(f"  CLIP unfrozen layers: {args.clip_lr} ({sum(p.numel() for p in clip_params):,} params)")
+    print(f"  Fusion/Text/Classifier: {args.learning_rate} ({sum(p.numel() for p in other_params):,} params)")
+
+    optimizer = torch.optim.AdamW(param_groups, weight_decay=args.weight_decay)
 
     # Setup loss
     criterion = nn.CrossEntropyLoss()
@@ -349,9 +473,16 @@ def main():
         print("\nMixed precision training enabled")
 
     # Training loop
-    best_val_f1 = 0.0
+    best_val_metric = 0.0
+    eval_metric_name = "f1"  # Evaluation metric (f1 = f1_macro by default)
+    checkpoint_history = []  # Track saved checkpoints
+
     print(f"\n{'='*60}")
     print("Starting Training")
+    print(f"{'='*60}")
+    print(f"Evaluation strategy: After each epoch")
+    print(f"Evaluation metric: F1 (macro)")
+    print(f"Checkpoint limit: Keep top 2 models")
     print(f"{'='*60}\n")
 
     for epoch in range(args.num_epochs):
@@ -365,45 +496,78 @@ def main():
 
         print(f"\nTraining - Loss: {train_loss:.4f}, "
               f"Acc: {train_metrics['accuracy']:.4f}, "
-              f"F1: {train_metrics['f1_macro']:.4f}")
+              f"F1: {train_metrics['f1']:.4f}")
 
-        # Validate
+        # Evaluate after each epoch
         val_loss, val_metrics = evaluate(model, val_loader, criterion, device)
 
         print(f"Validation - Loss: {val_loss:.4f}, "
               f"Acc: {val_metrics['accuracy']:.4f}, "
-              f"F1: {val_metrics['f1_macro']:.4f}")
+              f"F1: {val_metrics['f1']:.4f}")
 
-        # Save best model
-        if val_metrics['f1_macro'] > best_val_f1:
-            best_val_f1 = val_metrics['f1_macro']
-            checkpoint_path = output_dir / "best_model.pt"
+        # Save checkpoint based on eval metric
+        current_metric = val_metrics[eval_metric_name]
+
+        if current_metric > best_val_metric:
+            best_val_metric = current_metric
+
+            # Create checkpoint
+            checkpoint_path = output_dir / f"checkpoint_epoch{epoch+1}_f1{current_metric:.4f}.pt"
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'val_f1': best_val_f1,
+                'val_metrics': val_metrics,
+                'val_f1': current_metric,
                 'args': vars(args)
             }, checkpoint_path)
-            print(f"Saved best model (F1: {best_val_f1:.4f})")
+
+            checkpoint_history.append({
+                'path': checkpoint_path,
+                'metric': current_metric,
+                'epoch': epoch
+            })
+
+            # Sort by metric (descending) and keep only top 2
+            checkpoint_history = sorted(checkpoint_history, key=lambda x: x['metric'], reverse=True)
+
+            # Remove old checkpoints beyond limit (keep top 2)
+            if len(checkpoint_history) > 2:
+                for old_ckpt in checkpoint_history[2:]:
+                    if old_ckpt['path'].exists():
+                        old_ckpt['path'].unlink()
+                        print(f"Removed old checkpoint: {old_ckpt['path'].name}")
+                checkpoint_history = checkpoint_history[:2]
+
+            print(f"✓ Saved checkpoint (F1: {current_metric:.4f}) - Rank: 1/{len(checkpoint_history)}")
+        else:
+            print(f"  No improvement (Best F1: {best_val_metric:.4f})")
 
     # Test on best model
     print(f"\n{'='*60}")
     print("Testing on Best Model")
     print(f"{'='*60}\n")
 
-    checkpoint = torch.load(output_dir / "best_model.pt")
-    model.load_state_dict(checkpoint['model_state_dict'])
+    if len(checkpoint_history) > 0:
+        # Load the best checkpoint (rank 1)
+        best_checkpoint = checkpoint_history[0]
+        print(f"Loading best checkpoint: {best_checkpoint['path'].name}")
+        print(f"  Epoch: {best_checkpoint['epoch'] + 1}")
+        print(f"  Val F1: {best_checkpoint['metric']:.4f}\n")
+
+        checkpoint = torch.load(best_checkpoint['path'], weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        print("Warning: No checkpoint saved, using final model state\n")
 
     test_loss, test_metrics = evaluate(model, test_loader, criterion, device)
 
     print(f"\nTest Results:")
     print(f"  Loss: {test_loss:.4f}")
     print(f"  Accuracy: {test_metrics['accuracy']:.4f}")
-    print(f"  Precision: {test_metrics['precision_macro']:.4f}")
-    print(f"  Recall: {test_metrics['recall_macro']:.4f}")
-    print(f"  F1 (Macro): {test_metrics['f1_macro']:.4f}")
-    print(f"  F1 (Weighted): {test_metrics['f1_weighted']:.4f}")
+    print(f"  Precision: {test_metrics['precision']:.4f}")
+    print(f"  Recall: {test_metrics['recall']:.4f}")
+    print(f"  F1: {test_metrics['f1']:.4f}")
 
     # Save results (convert numpy types to Python native types)
     def convert_to_python_type(obj):
@@ -421,16 +585,32 @@ def main():
         else:
             return obj
 
+    # Save comprehensive results
     results = {
         'test_loss': float(test_loss),
         'test_metrics': convert_to_python_type(test_metrics),
-        'best_val_f1': float(best_val_f1)
+        'best_val_f1': float(best_val_metric),
+        'best_epoch': best_checkpoint['epoch'] + 1 if len(checkpoint_history) > 0 else args.num_epochs,
+        'total_epochs': args.num_epochs,
+        'eval_metric': 'f1',
+        'saved_checkpoints': [
+            {
+                'path': str(ckpt['path'].name),
+                'epoch': ckpt['epoch'] + 1,
+                'val_f1': float(ckpt['metric'])
+            }
+            for ckpt in checkpoint_history
+        ]
     }
 
     with open(output_dir / "results.json", "w") as f:
         json.dump(results, f, indent=2)
 
     print(f"\nResults saved to {output_dir / 'results.json'}")
+    print(f"\nSaved checkpoints:")
+    for i, ckpt in enumerate(checkpoint_history, 1):
+        print(f"  {i}. {ckpt['path'].name} (F1: {ckpt['metric']:.4f})")
+
     print(f"\n{'='*60}")
     print("Training Complete!")
     print(f"{'='*60}\n")

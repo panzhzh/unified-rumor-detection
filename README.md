@@ -57,34 +57,36 @@ unified-rumor-detection/
 
 ## Quick Start
 
-### 1. Load Data
-
-```python
-from src.data import UnifiedDataLoader
-
-loader = UnifiedDataLoader(data_root="data")
-amg_data = loader.load_dataset("AMG", split="train")
-```
-
-### 2. Extract Features
+### Train Baseline Model
 
 ```bash
-# Extract image features
-python scripts/features/extract_image_features.py --model clip_large
+# Train with default settings (MR2, partial CLIP unfreezing)
+python scripts/train_baseline.py --mixed_precision
 
-# Extract OCR text
-python scripts/ocr/extract_ocr.py --dataset MR2
+# Train on different dataset
+python scripts/train_baseline.py --dataset DGM4 --mixed_precision
+
+# Customize training
+python scripts/train_baseline.py \
+    --dataset MR2 \
+    --batch_size 16 \
+    --num_epochs 8 \
+    --unfreeze_clip_layers 3 \
+    --clip_lr 1e-6 \
+    --learning_rate 2e-5 \
+    --dropout 0.3 \
+    --weight_decay 0.1 \
+    --seed 42 \
+    --mixed_precision
 ```
 
-### 3. Use Base Components
-
-```python
-from src.models.base import TextEncoder, ImageEncoder, DeepFusionLayer
-
-text_encoder = TextEncoder()
-image_encoder = ImageEncoder()
-fusion_layer = DeepFusionLayer()
-```
+**Baseline Configuration:**
+- Text Encoder: XLM-RoBERTa-Base (278M params)
+- Image Encoder: CLIP-ViT-Base/16 (86M params, last 3 layers unfrozen)
+- Cross-modal Fusion: 3-layer bidirectional attention
+- Layered Learning Rates: CLIP (1e-6), Others (2e-5)
+- Regularization: Dropout 0.3, Weight Decay 0.1
+- Training: 8 epochs, seed 42
 
 ## Data Format
 

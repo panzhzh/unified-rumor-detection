@@ -33,20 +33,13 @@ def compute_metrics(
     # Accuracy
     metrics['accuracy'] = accuracy_score(y_true, y_pred)
 
-    # Precision, Recall, F1 (macro and weighted)
+    # Precision, Recall, F1 (macro average)
     precision, recall, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, labels=labels, average='macro', zero_division=0
     )
-    metrics['precision_macro'] = precision
-    metrics['recall_macro'] = recall
-    metrics['f1_macro'] = f1
-
-    precision_w, recall_w, f1_w, _ = precision_recall_fscore_support(
-        y_true, y_pred, labels=labels, average='weighted', zero_division=0
-    )
-    metrics['precision_weighted'] = precision_w
-    metrics['recall_weighted'] = recall_w
-    metrics['f1_weighted'] = f1_w
+    metrics['precision'] = precision
+    metrics['recall'] = recall
+    metrics['f1'] = f1
 
     # Per-class metrics
     precision_per_class, recall_per_class, f1_per_class, support = precision_recall_fscore_support(

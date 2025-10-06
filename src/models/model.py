@@ -12,10 +12,12 @@ import torch
 import torch.nn as nn
 from transformers import XLMRobertaTokenizer
 
-from ...base import TextEncoder, ImageEncoder, DeepFusionLayer, EvidenceAttentionPooling
+from .encoders import TextEncoder, ImageEncoder
+from .encoders import TextEncoder, ImageEncoder
+from .attention import DeepFusionLayer, EvidenceAttentionPooling
 
 
-class EvidenceFusionModel(nn.Module):
+class MultimodalModel(nn.Module):
     """
     Multimodal rumor detection model with evidence fusion.
 
@@ -30,24 +32,28 @@ class EvidenceFusionModel(nn.Module):
 
     def __init__(
         self,
-        num_classes: int = 2,
-        text_model_name: str = "xlm-roberta-base",
-        image_model_name: str = "openai/clip-vit-base-patch16",
-        num_fusion_layers: int = 3,
-        use_evidence: bool = True,
-        dropout: float = 0.1
+        num_classes,
+        text_model_name,
+        image_model_name,
+        num_fusion_layers,
+        num_heads,
+        use_evidence,
+        caption_max_length,
+        dropout,
+        unfreeze_clip_layers,
+        hidden_dim,
+        classifier_hidden_dim
     ):
         super().__init__()
         self.num_classes = num_classes
         self.use_evidence = use_evidence
-        self.hidden_dim = 768  # clip-vit-base-patch16 uses 768
+        self.hidden_dim = hidden_dim
 
         # Encoders
         self.text_encoder = TextEncoder(text_model_name, freeze=False)
         self.image_encoder = ImageEncoder(
             image_model_name,
-            freeze_backbone=True,
-            use_trainable_adapter=True
+            unfreeze_last_n_layers=unfreeze_clip_layers
         )
 
         # Projection layers to align dimensions
@@ -71,7 +77,7 @@ class EvidenceFusionModel(nn.Module):
         self.fusion_layers = nn.ModuleList([
             DeepFusionLayer(
                 dim=self.hidden_dim,
-                num_heads=8,
+                num_heads=num_heads,
                 dropout=dropout
             ) for _ in range(num_fusion_layers)
         ])
@@ -80,21 +86,21 @@ class EvidenceFusionModel(nn.Module):
         if use_evidence:
             # Tokenizer for caption encoding
             self.caption_tokenizer = XLMRobertaTokenizer.from_pretrained(text_model_name)
-            self.caption_max_length = 128
+            self.caption_max_length = caption_max_length
 
             # Evidence attention pooling
             self.evidence_attention = EvidenceAttentionPooling(
                 dim=self.hidden_dim,
-                num_heads=8,
+                num_heads=num_heads,
                 dropout=dropout
             )
 
             # Gate mechanism for evidence contribution
             self.evidence_gate = nn.Sequential(
-                nn.Linear(self.hidden_dim * 3, 512),
+                nn.Linear(self.hidden_dim * 3, classifier_hidden_dim),
                 nn.GELU(),
                 nn.Dropout(dropout),
-                nn.Linear(512, 1),
+                nn.Linear(classifier_hidden_dim, 1),
                 nn.Sigmoid()
             )
 
@@ -115,10 +121,10 @@ class EvidenceFusionModel(nn.Module):
 
         # Final classifier
         self.classifier = nn.Sequential(
-            nn.Linear(classifier_input_dim, 512),
+            nn.Linear(classifier_input_dim, classifier_hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(512, num_classes)
+            nn.Linear(classifier_hidden_dim, num_classes)
         )
 
     def forward(
@@ -186,6 +192,7 @@ class EvidenceFusionModel(nn.Module):
                         evidence_cls,
                         caption,
                         num_evidence_images,
+                        num_patches,  # Pass actual num_patches from image features
                         return_attention_weights
                     )
                 else:
@@ -193,6 +200,7 @@ class EvidenceFusionModel(nn.Module):
                         evidence_cls,
                         caption,
                         num_evidence_images,
+                        num_patches,  # Pass actual num_patches from image features
                         return_attention_weights
                     )
             else:
@@ -237,7 +245,7 @@ class EvidenceFusionModel(nn.Module):
         else:
             return logits
 
-    def _process_evidence(self, evidence_features, caption, num_evidence_images, return_attention_weights=False):
+    def _process_evidence(self, evidence_features, caption, num_evidence_images, num_patches, return_attention_weights=False):
         """
         Process evidence images with attention pooling.
 
@@ -245,6 +253,7 @@ class EvidenceFusionModel(nn.Module):
             evidence_features: [batch_size, num_evidence, hidden_dim]
             caption: List of caption strings
             num_evidence_images: List of evidence counts
+            num_patches: Number of patches in the image features
             return_attention_weights: Whether to return attention weights
 
         Returns:
@@ -286,7 +295,7 @@ class EvidenceFusionModel(nn.Module):
 
         # Create patch-level features (expand pooled evidence to patch format)
         # For simplicity, we replicate the pooled feature across patches
-        num_patches = 197  # CLIP ViT-B/16 has 197 patches (14x14 + 1 CLS)
+        # num_patches is passed from the actual image features shape
         evidence_patch_features = pooled_evidence.unsqueeze(1).expand(-1, num_patches, -1)
 
         # Apply gate

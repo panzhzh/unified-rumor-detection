@@ -1,16 +1,16 @@
 """
 Model components for rumor detection.
-
-Structure:
-- base/: Reusable base components (encoders, attention mechanisms)
-- experiments/: Experiment-specific models for different papers
 """
 
-from .base import TextEncoder, ImageEncoder, CrossModalAttention, DeepFusionLayer
+from .encoders import TextEncoder, ImageEncoder
+from .attention import CrossModalAttention, DeepFusionLayer, EvidenceAttentionPooling
+from .model import MultimodalModel
 
 __all__ = [
     'TextEncoder',
     'ImageEncoder',
     'CrossModalAttention',
-    'DeepFusionLayer'
+    'DeepFusionLayer',
+    'EvidenceAttentionPooling',
+    'MultimodalModel'
 ]

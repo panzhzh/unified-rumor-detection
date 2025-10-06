@@ -41,40 +41,38 @@ class TextEncoder(nn.Module):
 
 class ImageEncoder(nn.Module):
     """
-    Image encoder using CLIP vision model.
+    Image encoder using CLIP vision model with partial unfreezing.
 
     Args:
-        model_name: HuggingFace model name (default: openai/clip-vit-large-patch14)
-        freeze_backbone: Whether to freeze CLIP backbone
-        use_trainable_adapter: Whether to add trainable MLP adapter
-        adapter_hidden_dim: Hidden dimension for adapter (if used)
+        model_name: HuggingFace model name (default: openai/clip-vit-base-patch16)
+        unfreeze_last_n_layers: Number of last layers to unfreeze (default: 3)
     """
 
     def __init__(
         self,
-        model_name: str = "openai/clip-vit-large-patch14",
-        freeze_backbone: bool = True,
-        use_trainable_adapter: bool = True,
-        adapter_hidden_dim: int = 1024
+        model_name: str = "openai/clip-vit-base-patch16",
+        unfreeze_last_n_layers: int = 3
     ):
         super().__init__()
         self.clip = CLIPVisionModel.from_pretrained(model_name)
         self.hidden_size = self.clip.config.hidden_size
+        self.unfreeze_last_n_layers = unfreeze_last_n_layers
 
-        # Freeze CLIP backbone
-        if freeze_backbone:
-            for param in self.clip.parameters():
-                param.requires_grad = False
+        # First freeze all parameters
+        for param in self.clip.parameters():
+            param.requires_grad = False
 
-        # Optional trainable adapter
-        self.use_adapter = use_trainable_adapter
-        if use_trainable_adapter:
-            self.adapter = nn.Sequential(
-                nn.Linear(self.hidden_size, adapter_hidden_dim),
-                nn.GELU(),
-                nn.Dropout(0.1),
-                nn.Linear(adapter_hidden_dim, self.hidden_size)
-            )
+        # Then unfreeze last N layers if specified
+        if unfreeze_last_n_layers > 0:
+            num_layers = len(self.clip.vision_model.encoder.layers)
+            if unfreeze_last_n_layers > num_layers:
+                print(f"Warning: unfreeze_last_n_layers ({unfreeze_last_n_layers}) > total layers ({num_layers})")
+                unfreeze_last_n_layers = num_layers
+
+            print(f"Unfreezing last {unfreeze_last_n_layers} layers of CLIP (layers {num_layers - unfreeze_last_n_layers} to {num_layers - 1})")
+            for layer in self.clip.vision_model.encoder.layers[-unfreeze_last_n_layers:]:
+                for param in layer.parameters():
+                    param.requires_grad = True
 
     def forward(self, pixel_values):
         """
@@ -95,16 +93,10 @@ class ImageEncoder(nn.Module):
         else:
             batch_size, num_images = original_shape[0], 1
 
-        # Extract features
-        with torch.no_grad() if not self.training else torch.enable_grad():
-            outputs = self.clip(pixel_values=pixel_values)
-            last_hidden_state = outputs.last_hidden_state
-            pooled_output = outputs.pooler_output
-
-        # Apply adapter if enabled
-        if self.use_adapter:
-            last_hidden_state = self.adapter(last_hidden_state)
-            pooled_output = self.adapter(pooled_output)
+        # Extract CLIP features
+        outputs = self.clip(pixel_values=pixel_values)
+        last_hidden_state = outputs.last_hidden_state
+        pooled_output = outputs.pooler_output
 
         # Reshape back if multiple images
         if num_images > 1:
