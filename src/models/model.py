@@ -82,42 +82,25 @@ class MultimodalModel(nn.Module):
             ) for _ in range(num_fusion_layers)
         ])
 
-        # Evidence processing (if enabled)
+        # Text-guided image attention pooling (for evidence)
         if use_evidence:
-            # Tokenizer for caption encoding
-            self.caption_tokenizer = XLMRobertaTokenizer.from_pretrained(text_model_name)
-            self.caption_max_length = caption_max_length
-
-            # Evidence attention pooling
-            self.evidence_attention = EvidenceAttentionPooling(
-                dim=self.hidden_dim,
-                num_heads=num_heads,
-                dropout=dropout
-            )
-
-            # Gate mechanism for evidence contribution
-            self.evidence_gate = nn.Sequential(
+            # Attention weights: w^T [v_i; t; v_i ⊙ t]
+            self.image_attention_fc = nn.Sequential(
                 nn.Linear(self.hidden_dim * 3, classifier_hidden_dim),
-                nn.GELU(),
-                nn.Dropout(dropout),
-                nn.Linear(classifier_hidden_dim, 1),
-                nn.Sigmoid()
+                nn.Tanh(),
+                nn.Linear(classifier_hidden_dim, 1)
             )
 
-            # Pooling layers
-            self.text_pooler = nn.Linear(self.hidden_dim, self.hidden_dim)
-            self.image_pooler = nn.Linear(self.hidden_dim, self.hidden_dim)
-            self.evidence_pooler = nn.Linear(self.hidden_dim, self.hidden_dim)
+            # Prior weights for main vs evidence images
+            self.register_buffer('main_prior_weight', torch.tensor([2.0]))  # Main image prior: 1.5~3.0
+            self.register_buffer('evidence_prior_weight', torch.tensor([0.75]))  # Evidence prior: 0.5~1.0
 
-            # Classifier with evidence
-            classifier_input_dim = self.hidden_dim * 3
-        else:
-            # Pooling layers (no evidence)
-            self.text_pooler = nn.Linear(self.hidden_dim, self.hidden_dim)
-            self.image_pooler = nn.Linear(self.hidden_dim, self.hidden_dim)
+        # Pooling layers
+        self.text_pooler = nn.Linear(self.hidden_dim, self.hidden_dim)
+        self.image_pooler = nn.Linear(self.hidden_dim, self.hidden_dim)
 
-            # Classifier without evidence
-            classifier_input_dim = self.hidden_dim * 2
+        # Classifier
+        classifier_input_dim = self.hidden_dim * 2
 
         # Final classifier
         self.classifier = nn.Sequential(
@@ -132,223 +115,91 @@ class MultimodalModel(nn.Module):
         input_ids,
         attention_mask,
         pixel_values,
-        caption=None,
-        num_evidence_images=None,
+        evidence_pixel_values=None,
         return_attention_weights=False
     ):
         """
         Args:
-            input_ids: [batch_size, seq_len]
+            input_ids: [batch_size, seq_len] - Formatted text with [CAP][OCR][EVI]
             attention_mask: [batch_size, seq_len]
-            pixel_values: [batch_size, 3, 224, 224] or [batch_size, num_images, 3, 224, 224]
-            caption: Optional list of caption strings for evidence querying
-            num_evidence_images: Optional list of evidence counts per sample
-            return_attention_weights: Whether to return attention weights
+            pixel_values: [batch_size, 3, 224, 224] - Main image
+            evidence_pixel_values: [batch_size, num_evidence, 3, 224, 224] - Evidence images (optional)
 
         Returns:
             logits: [batch_size, num_classes]
-            attention_info: Optional dict with attention weights (if return_attention_weights=True)
         """
-        # Encode text - use full sequence
-        text_hidden, text_cls = self.text_encoder(input_ids, attention_mask)
-        # text_hidden: [batch_size, seq_len, text_dim]
+        batch_size = input_ids.shape[0]
 
-        # Project text to common dimension
+        # Encode text (with evidence text already concatenated)
+        text_hidden, text_cls = self.text_encoder(input_ids, attention_mask)
         text_hidden = self.text_projection(text_hidden)
         # text_hidden: [batch_size, seq_len, hidden_dim]
+        # text_cls: [batch_size, hidden_dim]
 
-        # Encode images
-        if pixel_values.dim() == 4:
-            # Single image per sample
-            image_hidden, image_pooled = self.image_encoder(pixel_values)
-            # image_hidden: [batch_size, num_patches, image_dim]
+        # Encode main image
+        main_image_hidden, main_image_cls = self.image_encoder(pixel_values)
+        main_image_hidden = self.image_projection(main_image_hidden)
+        # main_image_hidden: [batch_size, num_patches, hidden_dim]
 
-            # Project image to common dimension
-            main_image_features = self.image_projection(image_hidden)
-            # main_image_features: [batch_size, num_patches, hidden_dim]
-            evidence_image_features = None
+        # Process evidence images if available
+        if self.use_evidence and evidence_pixel_values is not None and evidence_pixel_values.shape[1] > 0:
+            # Encode evidence images
+            num_evidence = evidence_pixel_values.shape[1]
+            evi_flat = evidence_pixel_values.view(batch_size * num_evidence, 3, 224, 224)
+            evi_hidden, evi_cls = self.image_encoder(evi_flat)
+            evi_hidden = self.image_projection(evi_hidden)
+            evi_cls = evi_cls.view(batch_size, num_evidence, self.hidden_dim)
+
+            # Text-guided attention pooling
+            # α_i = softmax(w^T [v_i; t; v_i ⊙ t])
+            image_cls_all = torch.cat([main_image_cls.unsqueeze(1), evi_cls], dim=1)  # [batch, 1+num_evi, hidden]
+            text_cls_expanded = text_cls.unsqueeze(1).expand(-1, 1 + num_evidence, -1)  # [batch, 1+num_evi, hidden]
+
+            # Concatenate [v_i; t; v_i ⊙ t]
+            attention_input = torch.cat([
+                image_cls_all,
+                text_cls_expanded,
+                image_cls_all * text_cls_expanded
+            ], dim=-1)  # [batch, 1+num_evi, hidden*3]
+
+            # Compute attention scores
+            attention_logits = self.image_attention_fc(attention_input).squeeze(-1)  # [batch, 1+num_evi]
+
+            # Apply prior weights (main image has higher prior)
+            prior_weights = torch.cat([
+                self.main_prior_weight.expand(batch_size, 1),
+                self.evidence_prior_weight.expand(batch_size, num_evidence)
+            ], dim=1)  # [batch, 1+num_evi]
+
+            attention_logits = attention_logits + torch.log(prior_weights + 1e-8)
+
+            # Softmax to get attention weights
+            attention_weights = torch.softmax(attention_logits, dim=1)  # [batch, 1+num_evi]
+
+            # Weighted pooling
+            image_cls_pooled = (attention_weights.unsqueeze(-1) * image_cls_all).sum(dim=1)  # [batch, hidden]
+
+            # Use pooled representation for fusion
+            image_hidden = image_cls_pooled.unsqueeze(1)  # [batch, 1, hidden] for fusion compatibility
+
         else:
-            # Multiple images: first is main, rest are evidence
-            image_hidden, image_pooled = self.image_encoder(pixel_values)
-            # image_hidden: [batch_size, num_images, num_patches, image_dim]
+            # No evidence, use only main image
+            image_hidden = main_image_cls.unsqueeze(1)  # [batch, 1, hidden]
 
-            # Project all images to common dimension
-            batch_size, num_images, num_patches, _ = image_hidden.shape
-            image_hidden_flat = image_hidden.view(batch_size * num_images, num_patches, -1)
-            image_hidden_projected = self.image_projection(image_hidden_flat)
-            image_hidden = image_hidden_projected.view(batch_size, num_images, num_patches, self.hidden_dim)
-
-            main_image_features = image_hidden[:, 0, :, :]  # [batch_size, num_patches, hidden_dim]
-
-            if self.use_evidence and image_hidden.shape[1] > 1:
-                # Extract evidence features: [batch_size, num_evidence, num_patches, hidden_dim]
-                evidence_features = image_hidden[:, 1:, :, :]
-                # Use CLS token: [batch_size, num_evidence, hidden_dim]
-                evidence_cls = evidence_features[:, :, 0, :]
-
-                # Process evidence with attention
-                if return_attention_weights:
-                    evidence_image_features, attention_info = self._process_evidence(
-                        evidence_cls,
-                        caption,
-                        num_evidence_images,
-                        num_patches,  # Pass actual num_patches from image features
-                        return_attention_weights
-                    )
-                else:
-                    evidence_image_features = self._process_evidence(
-                        evidence_cls,
-                        caption,
-                        num_evidence_images,
-                        num_patches,  # Pass actual num_patches from image features
-                        return_attention_weights
-                    )
-            else:
-                evidence_image_features = None
-
-        # Multi-layer cross-modal fusion (token-level)
+        # Cross-modal fusion
         for fusion_layer in self.fusion_layers:
-            text_hidden, main_image_features = fusion_layer(text_hidden, main_image_features)
+            text_hidden, image_hidden = fusion_layer(text_hidden, image_hidden)
 
-            if evidence_image_features is not None:
-                # Also fuse with evidence
-                text_hidden, evidence_image_features = fusion_layer(text_hidden, evidence_image_features)
-                main_image_features, evidence_image_features = fusion_layer(main_image_features, evidence_image_features)
-
-        # Pool to single representations
+        # Pool representations
         text_pooled = text_hidden[:, 0, :]  # CLS token
-        main_pooled = main_image_features[:, 0, :]  # CLS token
+        image_pooled = image_hidden[:, 0, :]  # Pooled image
 
-        # Apply pooling layers
         text_pooled = torch.tanh(self.text_pooler(text_pooled))
-        main_pooled = torch.tanh(self.image_pooler(main_pooled))
+        image_pooled = torch.tanh(self.image_pooler(image_pooled))
 
-        # Fuse features
-        if self.use_evidence and evidence_image_features is not None:
-            evidence_pooled = evidence_image_features[:, 0, :]
-            evidence_pooled = torch.tanh(self.evidence_pooler(evidence_pooled))
-            fused_features = torch.cat([text_pooled, main_pooled, evidence_pooled], dim=1)
-        elif self.use_evidence:
-            # No evidence images, use zero padding
-            evidence_pooled = torch.zeros(text_pooled.shape[0], self.hidden_dim, device=text_pooled.device)
-            evidence_pooled = torch.tanh(self.evidence_pooler(evidence_pooled))
-            fused_features = torch.cat([text_pooled, main_pooled, evidence_pooled], dim=1)
-        else:
-            # Evidence disabled
-            fused_features = torch.cat([text_pooled, main_pooled], dim=1)
-
-        # Classify
+        # Concatenate and classify
+        fused_features = torch.cat([text_pooled, image_pooled], dim=1)
         logits = self.classifier(fused_features)
 
-        if return_attention_weights:
-            return logits, attention_info
-        else:
-            return logits
+        return logits
 
-    def _process_evidence(self, evidence_features, caption, num_evidence_images, num_patches, return_attention_weights=False):
-        """
-        Process evidence images with attention pooling.
-
-        Args:
-            evidence_features: [batch_size, num_evidence, hidden_dim]
-            caption: List of caption strings
-            num_evidence_images: List of evidence counts
-            num_patches: Number of patches in the image features
-            return_attention_weights: Whether to return attention weights
-
-        Returns:
-            evidence_patch_features: [batch_size, num_patches, hidden_dim]
-            attention_info: Optional dict (if return_attention_weights=True)
-        """
-        batch_size = evidence_features.shape[0]
-
-        # Encode caption as query
-        caption_query = self._encode_caption(caption)  # [batch_size, hidden_dim]
-
-        # Handle None caption (use zero vector as fallback)
-        if caption_query is None:
-            caption_query = torch.zeros(batch_size, self.hidden_dim, device=evidence_features.device)
-
-        # Attention pooling
-        pooled_evidence, attention_weights = self.evidence_attention(
-            caption_query,
-            evidence_features
-        )
-
-        # Gate mechanism
-        gate_input = torch.cat([
-            caption_query,
-            evidence_features.mean(dim=1),  # Average evidence
-            pooled_evidence
-        ], dim=1)
-
-        gate_weight = self.evidence_gate(gate_input)  # [batch_size, 1]
-
-        # Mask samples with no evidence
-        if num_evidence_images is not None:
-            has_evidence = torch.tensor(
-                [n > 0 for n in num_evidence_images],
-                device=evidence_features.device,
-                dtype=torch.float32
-            ).unsqueeze(1)
-            gate_weight = gate_weight * has_evidence
-
-        # Create patch-level features (expand pooled evidence to patch format)
-        # For simplicity, we replicate the pooled feature across patches
-        # num_patches is passed from the actual image features shape
-        evidence_patch_features = pooled_evidence.unsqueeze(1).expand(-1, num_patches, -1)
-
-        # Apply gate
-        gate_weight_expanded = gate_weight.unsqueeze(1)
-        evidence_patch_features = evidence_patch_features * gate_weight_expanded
-
-        if return_attention_weights:
-            attention_info = {
-                'attention_weights': attention_weights,
-                'gate_weights': gate_weight.squeeze(1),
-                'num_evidence_images': num_evidence_images,
-                'captions': caption
-            }
-            return evidence_patch_features, attention_info
-        else:
-            return evidence_patch_features
-
-    def _encode_caption(self, caption):
-        """Encode caption strings as query vectors."""
-        # Check for None first before trying to get len()
-        if caption is None:
-            # Return None to signal caller to use fallback
-            return None
-
-        if not hasattr(self, 'caption_tokenizer'):
-            # Fallback - now safe to use len()
-            batch_size = 1 if isinstance(caption, str) else len(caption)
-            return torch.zeros(batch_size, self.hidden_dim, device=next(self.parameters()).device)
-
-        device = next(self.parameters()).device
-
-        # Handle string or list
-        if isinstance(caption, str):
-            captions = [caption]
-        else:
-            captions = caption
-
-        # Tokenize
-        caption_inputs = self.caption_tokenizer(
-            captions,
-            max_length=self.caption_max_length,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt'
-        )
-
-        caption_inputs = {k: v.to(device) for k, v in caption_inputs.items()}
-
-        # Encode
-        with torch.no_grad():
-            caption_hidden, caption_cls = self.text_encoder(
-                caption_inputs['input_ids'],
-                caption_inputs['attention_mask']
-            )
-
-        return caption_cls

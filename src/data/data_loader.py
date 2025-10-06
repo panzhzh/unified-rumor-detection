@@ -62,6 +62,9 @@ class UnifiedDataItem:
     author: Optional[str] = None
     language: Optional[str] = None
 
+    # Evidence fields (for MR2 dataset)
+    evidence_list: Optional[List[Dict]] = None  # List of evidence items with text and image_path
+
     # Extended fields
     metadata: Dict = None
 
@@ -105,6 +108,15 @@ class BaseDatasetLoader:
         """Load dataset for a specific split"""
         raise NotImplementedError
 
+    def load_ocr_data(self, dataset_dir: Path, split: str) -> Dict[str, str]:
+        """Load OCR data from ocr_{split}.json if exists"""
+        ocr_path = dataset_dir / f"ocr_{split}.json"
+        if ocr_path.exists():
+            with open(ocr_path, 'r', encoding='utf-8') as f:
+                ocr_list = json.load(f)
+                return {item['id']: item['ocr'] for item in ocr_list}
+        return {}
+
     def get_stats(self, split: str) -> Dict:
         """Get dataset statistics"""
         data = self.load(split)
@@ -138,6 +150,9 @@ class AMGLoader(BaseDatasetLoader):
         with open(json_path, 'r', encoding='utf-8') as f:
             raw_data = json.load(f)
 
+        # Load OCR data
+        ocr_data = self.load_ocr_data(self.dataset_dir, split)
+
         unified_data = []
         for item in raw_data:
             original_label = int(item['label'])
@@ -156,6 +171,7 @@ class AMGLoader(BaseDatasetLoader):
                 split=split,
                 text=item['content'],
                 image_path=image_path_str,  # AMG has images
+                ocr=ocr_data.get(item_id, ''),
                 timestamp=item.get('create_time'),
                 metadata={
                     "original_label": original_label,
@@ -176,6 +192,9 @@ class DGM4Loader(BaseDatasetLoader):
         json_path = self.dataset_dir / "metadata" / f"{split}.json"
         with open(json_path, 'r', encoding='utf-8') as f:
             raw_data = json.load(f)
+
+        # Load OCR data
+        ocr_data = self.load_ocr_data(self.dataset_dir, split)
 
         unified_data = []
         for idx, item in enumerate(raw_data):
@@ -208,6 +227,7 @@ class DGM4Loader(BaseDatasetLoader):
                 split=split,
                 text=item['text'],
                 image_path=str(self.dataset_dir / image_rel_path),
+                ocr=ocr_data.get(item_id, ''),
                 metadata={
                     "original_id": item['id'],  # Preserve original ID
                     "manipulation_type": item['fake_cls'],  # original, face_swap, etc.
@@ -245,6 +265,9 @@ class FineFakeLoader(BaseDatasetLoader):
 
         with open(json_path, 'r', encoding='utf-8') as f:
             raw_data = json.load(f)
+
+        # Load OCR data
+        ocr_data = self.load_ocr_data(self.dataset_dir, split)
 
         unified_data = []
         for item in raw_data:
@@ -294,6 +317,7 @@ class FineFakeLoader(BaseDatasetLoader):
                 split=split,
                 text=text,
                 image_path=image_path,
+                ocr=ocr_data.get(item_id, ''),
                 entities=entities,
                 timestamp=timestamp,
                 author=author,
@@ -325,14 +349,35 @@ class MR2Loader(BaseDatasetLoader):
         with open(json_path, 'r', encoding='utf-8') as f:
             raw_data = json.load(f)
 
+        # Load evidence data
+        evidence_path = self.dataset_dir / f"evidence_{split}.json"
+        evidence_data = {}
+        if evidence_path.exists():
+            with open(evidence_path, 'r', encoding='utf-8') as f:
+                evidence_data = json.load(f)
+
+        # Load OCR data
+        ocr_path = self.dataset_dir / f"ocr_{split}.json"
+        ocr_data = {}
+        if ocr_path.exists():
+            with open(ocr_path, 'r', encoding='utf-8') as f:
+                ocr_list = json.load(f)
+                ocr_data = {item['id']: item['ocr'] for item in ocr_list}
+
         unified_data = []
         for item_id, item in raw_data.items():
             original_label = int(item['label'])
-            # MR2: 0=non-rumor, 1=rumor, 2=unverified
-            # Keep as-is since it matches our convention (0=real, 1=fake)
-            # Note: label=2 (unverified) is kept for compatibility
 
-            # Use original ID (already unique string keys like "0", "1", "2")
+            # Get OCR from ocr_data (overrides dataset_items OCR)
+            ocr_text = ocr_data.get(item_id, item.get('ocr', ''))
+
+            # Get evidence list
+            evidence_list = evidence_data.get(item_id, [])
+            # Convert relative paths to absolute
+            for evi in evidence_list:
+                if 'image_path' in evi and evi['image_path']:
+                    evi['image_path'] = str(self.dataset_dir / evi['image_path'])
+
             unified_data.append(UnifiedDataItem(
                 id=item_id,
                 label=original_label,
@@ -340,8 +385,9 @@ class MR2Loader(BaseDatasetLoader):
                 split=split,
                 text=item['caption'],
                 image_path=str(self.dataset_dir / item['image_path']),
-                ocr=item.get('ocr'),
+                ocr=ocr_text,
                 language=item.get('language'),
+                evidence_list=evidence_list if evidence_list else None,
                 metadata={
                     "direct_search_path": item.get('direct_path'),
                     "inverse_search_path": item.get('inv_path')
@@ -372,6 +418,9 @@ class MMFakeBenchLoader(BaseDatasetLoader):
         with open(json_path, 'r', encoding='utf-8') as f:
             raw_data = json.load(f)
 
+        # Load OCR data
+        ocr_data = self.load_ocr_data(self.dataset_dir, split)
+
         unified_data = []
         for idx, item in enumerate(raw_data):
             # MMFakeBench: 'True'=real, 'Fake'=fake -> Unified: 0=real, 1=fake
@@ -397,6 +446,7 @@ class MMFakeBenchLoader(BaseDatasetLoader):
                 split=split,
                 text=item['text'],
                 image_path=str(image_path) if image_path.exists() else None,
+                ocr=ocr_data.get(item_id, ''),
                 metadata={
                     "original_label": original_label,
                     "text_source": item.get('text_source'),

@@ -66,44 +66,68 @@ class RumorDetectionDataset(Dataset):
             'dataset_name': item.dataset_name
         }
 
-        # Process text
-        if item.has_text():
-            text = item.get_all_text() if self.use_ocr else item.text
+        # Build formatted text with evidence
+        text = self._build_formatted_text(item)
 
-            if self.text_tokenizer:
-                encoded = self.text_tokenizer(
-                    text,
-                    max_length=self.max_text_length,
-                    padding='max_length',
-                    truncation=True,
-                    return_tensors='pt'
-                )
-                output['input_ids'] = encoded['input_ids'].squeeze(0)
-                output['attention_mask'] = encoded['attention_mask'].squeeze(0)
-            else:
-                output['text'] = text
+        if self.text_tokenizer:
+            encoded = self.text_tokenizer(
+                text,
+                max_length=self.max_text_length,
+                padding='max_length',
+                truncation=True,
+                return_tensors='pt'
+            )
+            output['input_ids'] = encoded['input_ids'].squeeze(0)
+            output['attention_mask'] = encoded['attention_mask'].squeeze(0)
         else:
-            output['text'] = ""
+            output['text'] = text
 
-        # Process image
+        # Process main image
         if item.has_image():
             try:
                 image = Image.open(item.image_path).convert('RGB')
                 output['image'] = self.image_transform(image)
                 output['has_image'] = True
             except Exception as e:
-                # Fallback: create zero tensor if image loading fails
                 output['image'] = torch.zeros(3, 224, 224)
                 output['has_image'] = False
         else:
             output['image'] = torch.zeros(3, 224, 224)
             output['has_image'] = False
 
+        # Process evidence (store raw data for filtering in collate_fn)
+        if item.evidence_list:
+            output['evidence_list'] = item.evidence_list
+            output['caption'] = item.text  # For similarity calculation
+            output['ocr'] = item.ocr if item.has_ocr() else ''  # For collate_fn formatting
+        else:
+            output['evidence_list'] = None
+            output['caption'] = None
+            output['ocr'] = None
+
         # Add metadata if requested
         if self.return_metadata:
             output['metadata'] = item.metadata
 
         return output
+
+    def _build_formatted_text(self, item: 'UnifiedDataItem') -> str:
+        """Build formatted text: [CAP] ... [OCR] ... [EVI] ..."""
+        parts = []
+
+        # [CAP] section
+        if item.has_text():
+            parts.append(f"[CAP] {item.text}")
+
+        # [OCR] section
+        if item.has_ocr() and self.use_ocr:
+            parts.append(f"[OCR] {item.ocr}")
+
+        # [EVI] section - placeholder, will be filled in collate_fn
+        if item.evidence_list:
+            parts.append("[EVI]")
+
+        return " ".join(parts)
 
 
 class TextOnlyDataset(Dataset):

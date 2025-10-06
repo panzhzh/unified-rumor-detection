@@ -26,6 +26,7 @@ sys.path.insert(0, str(project_root))
 
 from src.data import UnifiedDataLoader
 from src.data.dataset import MultimodalDataset
+from src.data.evidence_utils import select_top_evidence, format_evidence_text, load_evidence_images
 from src.models import MultimodalModel
 from src.utils.metrics import compute_metrics
 
@@ -150,7 +151,108 @@ def create_data_filter(language=None, exclude_unverified=False):
     return filter_fn
 
 
-def prepare_dataloaders(args, tokenizer):
+def create_collate_fn(model, tokenizer, device):
+    """Create custom collate function for evidence processing"""
+
+    def collate_fn(batch):
+        """Process batch with evidence filtering and text re-tokenization"""
+        # Extract fields
+        ids = [item['id'] for item in batch]
+        labels = torch.tensor([item['label'] for item in batch], dtype=torch.long)
+        images = torch.stack([item['image'] for item in batch])
+
+        # Process evidence
+        evidence_images_list = []
+        formatted_texts = []
+
+        for item in batch:
+            caption = item.get('caption')
+            ocr = item.get('ocr', '')
+            evidence_list = item.get('evidence_list')
+
+            # Select top-5 evidence if available
+            if evidence_list and caption:
+                selected_evidence = select_top_evidence(
+                    caption=caption,
+                    evidence_list=evidence_list,
+                    text_encoder=model.text_encoder,
+                    tokenizer=tokenizer,
+                    device=device,
+                    max_evidence=5
+                )
+
+                # Format text with evidence
+                formatted_text = format_evidence_text(
+                    caption=caption,
+                    ocr=ocr,
+                    evidence_list=selected_evidence,
+                    tokenizer=tokenizer,
+                    cap_budget=64,
+                    ocr_budget=192,
+                    evi_budget=256,
+                    evi_per_item=50
+                )
+
+                # Load evidence images
+                from torchvision import transforms
+                transform = transforms.Compose([
+                    transforms.Resize((224, 224)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                ])
+                evi_imgs = load_evidence_images(
+                    evidence_list=selected_evidence,
+                    image_transform=transform,
+                    max_images=5
+                )
+                evidence_images_list.append(evi_imgs)
+            else:
+                # No evidence, format as [CAP] [OCR] only
+                parts = []
+                if caption:
+                    parts.append(f"[CAP] {caption}")
+                if ocr:
+                    parts.append(f"[OCR] {ocr}")
+                formatted_text = " ".join(parts) if parts else item.get('text', '')
+                evidence_images_list.append(torch.zeros(0, 3, 224, 224))
+
+            formatted_texts.append(formatted_text)
+
+        # Re-tokenize formatted texts
+        encoded = tokenizer(
+            formatted_texts,
+            max_length=512,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )
+
+        # Pad evidence images to same size
+        max_evi = max([evi.shape[0] for evi in evidence_images_list])
+        if max_evi > 0:
+            padded_evidence = []
+            for evi in evidence_images_list:
+                if evi.shape[0] < max_evi:
+                    padding = torch.zeros(max_evi - evi.shape[0], 3, 224, 224)
+                    evi = torch.cat([evi, padding], dim=0)
+                padded_evidence.append(evi)
+            evidence_images = torch.stack(padded_evidence)
+        else:
+            evidence_images = None
+
+        return {
+            'ids': ids,
+            'input_ids': encoded['input_ids'],
+            'attention_mask': encoded['attention_mask'],
+            'pixel_values': images,
+            'evidence_pixel_values': evidence_images,
+            'labels': labels
+        }
+
+    return collate_fn
+
+
+def prepare_dataloaders(args, tokenizer, model, device):
     """Prepare train/val/test dataloaders"""
 
     # Create data filter
@@ -198,6 +300,9 @@ def prepare_dataloaders(args, tokenizer):
         use_ocr=True
     )
 
+    # Create custom collate function
+    collate_fn = create_collate_fn(model, tokenizer, device)
+
     # Create dataloaders
     train_loader = DataLoader(
         train_dataset,
@@ -205,7 +310,8 @@ def prepare_dataloaders(args, tokenizer):
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=args.pin_memory,
-        prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None
+        prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None,
+        collate_fn=collate_fn
     )
 
     val_loader = DataLoader(
@@ -214,7 +320,8 @@ def prepare_dataloaders(args, tokenizer):
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=args.pin_memory,
-        prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None
+        prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None,
+        collate_fn=collate_fn
     )
 
     test_loader = DataLoader(
@@ -223,7 +330,8 @@ def prepare_dataloaders(args, tokenizer):
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=args.pin_memory,
-        prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None
+        prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None,
+        collate_fn=collate_fn
     )
 
     return train_loader, val_loader, test_loader, num_classes
@@ -241,15 +349,16 @@ def train_epoch(model, train_loader, optimizer, criterion, device, scaler=None, 
         # Move to device
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
-        pixel_values = batch['image'].to(device)
-        labels = batch['label'].to(device)
+        pixel_values = batch['pixel_values'].to(device)
+        evidence_pixel_values = batch['evidence_pixel_values'].to(device) if batch['evidence_pixel_values'] is not None else None
+        labels = batch['labels'].to(device)
 
         optimizer.zero_grad()
 
         # Forward pass with mixed precision
         if scaler is not None:
             with autocast(device_type='cuda', dtype=torch.float16):
-                logits = model(input_ids, attention_mask, pixel_values)
+                logits = model(input_ids, attention_mask, pixel_values, evidence_pixel_values)
                 loss = criterion(logits, labels)
 
             # Backward pass
@@ -259,7 +368,7 @@ def train_epoch(model, train_loader, optimizer, criterion, device, scaler=None, 
             scaler.step(optimizer)
             scaler.update()
         else:
-            logits = model(input_ids, attention_mask, pixel_values)
+            logits = model(input_ids, attention_mask, pixel_values, evidence_pixel_values)
             loss = criterion(logits, labels)
 
             # Backward pass
@@ -292,10 +401,11 @@ def evaluate(model, data_loader, criterion, device):
         for batch in tqdm(data_loader, desc="Evaluating"):
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
-            pixel_values = batch['image'].to(device)
-            labels = batch['label'].to(device)
+            pixel_values = batch['pixel_values'].to(device)
+            evidence_pixel_values = batch['evidence_pixel_values'].to(device) if batch['evidence_pixel_values'] is not None else None
+            labels = batch['labels'].to(device)
 
-            logits = model(input_ids, attention_mask, pixel_values)
+            logits = model(input_ids, attention_mask, pixel_values, evidence_pixel_values)
             loss = criterion(logits, labels)
 
             preds = torch.argmax(logits, dim=1)
@@ -412,10 +522,17 @@ def main():
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.text_model)
 
-    # Prepare dataloaders
-    train_loader, val_loader, test_loader, num_classes = prepare_dataloaders(args, tokenizer)
+    # Create model first (needed for collate_fn)
+    # Temporarily determine num_classes
+    from src.data import UnifiedDataLoader
+    temp_loader = UnifiedDataLoader(data_root=args.data_root)
+    filter_fn = create_data_filter(language=args.language, exclude_unverified=args.exclude_unverified)
+    temp_train = temp_loader.load_dataset(args.dataset, "train", filter_fn=filter_fn)
+    temp_val = temp_loader.load_dataset(args.dataset, "val", filter_fn=filter_fn)
+    temp_test = temp_loader.load_dataset(args.dataset, "test", filter_fn=filter_fn)
+    unique_labels = set([item.label for item in temp_train + temp_val + temp_test])
+    num_classes = len(unique_labels)
 
-    # Create model
     print(f"\nInitializing model...")
     print(f"  Text encoder: {args.text_model}")
     print(f"  Image encoder: {args.image_model}")
@@ -436,6 +553,9 @@ def main():
         hidden_dim=args.hidden_dim,
         classifier_hidden_dim=args.classifier_hidden_dim
     ).to(device)
+
+    # Prepare dataloaders (needs model for collate_fn)
+    train_loader, val_loader, test_loader, num_classes = prepare_dataloaders(args, tokenizer, model, device)
 
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
