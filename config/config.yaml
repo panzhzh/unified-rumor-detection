@@ -41,7 +41,8 @@ model:
   num_heads: 8  # Number of attention heads in fusion layers
 
   # Evidence fusion (advanced feature)
-  use_evidence: false
+  use_evidence_text: true  # Whether to use evidence text
+  use_evidence_image: true  # Whether to use evidence images
   caption_max_length: 128  # Max length for evidence captions
 
   # CLIP unfreezing strategy

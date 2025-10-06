@@ -151,7 +151,7 @@ def create_data_filter(language=None, exclude_unverified=False):
     return filter_fn
 
 
-def create_collate_fn(model, tokenizer, device):
+def create_collate_fn(model, tokenizer, device, use_evidence_text=True, use_evidence_image=True):
     """Create custom collate function for evidence processing"""
 
     def collate_fn(batch):
@@ -170,8 +170,8 @@ def create_collate_fn(model, tokenizer, device):
             ocr = item.get('ocr', '')
             evidence_list = item.get('evidence_list')
 
-            # Select top-5 evidence if available
-            if evidence_list and caption:
+            # Select top-5 evidence if available and enabled
+            if evidence_list and caption and (use_evidence_text or use_evidence_image):
                 selected_evidence = select_top_evidence(
                     caption=caption,
                     evidence_list=evidence_list,
@@ -181,33 +181,46 @@ def create_collate_fn(model, tokenizer, device):
                     max_evidence=5
                 )
 
-                # Format text with evidence
-                formatted_text = format_evidence_text(
-                    caption=caption,
-                    ocr=ocr,
-                    evidence_list=selected_evidence,
-                    tokenizer=tokenizer,
-                    cap_budget=64,
-                    ocr_budget=192,
-                    evi_budget=256,
-                    evi_per_item=50
-                )
+                # Format text with evidence (only if use_evidence_text is True)
+                if use_evidence_text:
+                    formatted_text = format_evidence_text(
+                        caption=caption,
+                        ocr=ocr,
+                        evidence_list=selected_evidence,
+                        tokenizer=tokenizer,
+                        cap_budget=64,
+                        ocr_budget=192,
+                        evi_budget=256,
+                        evi_per_item=50
+                    )
+                else:
+                    # Evidence text disabled, only use [CAP] [OCR]
+                    parts = []
+                    if caption:
+                        parts.append(f"[CAP] {caption}")
+                    if ocr:
+                        parts.append(f"[OCR] {ocr}")
+                    formatted_text = " ".join(parts)
 
-                # Load evidence images
-                from torchvision import transforms
-                transform = transforms.Compose([
-                    transforms.Resize((224, 224)),
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-                ])
-                evi_imgs = load_evidence_images(
-                    evidence_list=selected_evidence,
-                    image_transform=transform,
-                    max_images=5
-                )
-                evidence_images_list.append(evi_imgs)
+                # Load evidence images (only if use_evidence_image is True)
+                if use_evidence_image:
+                    from torchvision import transforms
+                    transform = transforms.Compose([
+                        transforms.Resize((224, 224)),
+                        transforms.ToTensor(),
+                        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                    ])
+                    evi_imgs = load_evidence_images(
+                        evidence_list=selected_evidence,
+                        image_transform=transform,
+                        max_images=5
+                    )
+                    evidence_images_list.append(evi_imgs)
+                else:
+                    # Evidence images disabled
+                    evidence_images_list.append(torch.zeros(0, 3, 224, 224))
             else:
-                # No evidence, format as [CAP] [OCR] only
+                # No evidence or evidence disabled, format as [CAP] [OCR] only
                 parts = []
                 if caption:
                     parts.append(f"[CAP] {caption}")
@@ -283,25 +296,31 @@ def prepare_dataloaders(args, tokenizer, model, device):
         train_data,
         text_tokenizer=tokenizer,
         max_text_length=512,
-        use_ocr=True
+        use_ocr=args.use_ocr
     )
 
     val_dataset = MultimodalDataset(
         val_data,
         text_tokenizer=tokenizer,
         max_text_length=512,
-        use_ocr=True
+        use_ocr=args.use_ocr
     )
 
     test_dataset = MultimodalDataset(
         test_data,
         text_tokenizer=tokenizer,
         max_text_length=512,
-        use_ocr=True
+        use_ocr=args.use_ocr
     )
 
     # Create custom collate function
-    collate_fn = create_collate_fn(model, tokenizer, device)
+    collate_fn = create_collate_fn(
+        model,
+        tokenizer,
+        device,
+        use_evidence_text=args.use_evidence_text,
+        use_evidence_image=args.use_evidence_image
+    )
 
     # Create dataloaders
     train_loader = DataLoader(
@@ -438,6 +457,9 @@ def main():
         if not args.exclude_unverified:
             args.exclude_unverified = config['dataset']['exclude_unverified']
 
+        # Add use_ocr from config
+        args.use_ocr = config['dataset'].get('use_ocr', True)
+
         # Model
         if args.text_model == "xlm-roberta-base":
             args.text_model = config['model']['text_model']
@@ -449,8 +471,6 @@ def main():
             args.num_fusion_layers = config['model']['num_fusion_layers']
         if args.num_heads == 8:
             args.num_heads = config['model']['num_heads']
-        if not args.use_evidence:
-            args.use_evidence = config['model']['use_evidence']
         if args.caption_max_length == 128:
             args.caption_max_length = config['model']['caption_max_length']
         if args.dropout == 0.3:
@@ -459,6 +479,10 @@ def main():
             args.unfreeze_clip_layers = config['model']['unfreeze_clip_layers']
         if args.classifier_hidden_dim == 512:
             args.classifier_hidden_dim = config['model']['classifier_hidden_dim']
+
+        # Add evidence control flags from config
+        args.use_evidence_text = config['model'].get('use_evidence_text', True)
+        args.use_evidence_image = config['model'].get('use_evidence_image', True)
 
         # Training
         if args.num_epochs == 8:
@@ -497,6 +521,11 @@ def main():
             args.eval_steps = config['experiment']['eval_steps']
         if args.save_steps == 500:
             args.save_steps = config['experiment']['save_steps']
+    else:
+        # Set defaults if config not loaded
+        args.use_ocr = getattr(args, 'use_ocr', True)
+        args.use_evidence_text = getattr(args, 'use_evidence_text', True)
+        args.use_evidence_image = getattr(args, 'use_evidence_image', True)
 
     # Set seed
     set_seed(args.seed)
@@ -539,6 +568,10 @@ def main():
     print(f"  Fusion layers: {args.num_fusion_layers}")
     print(f"  Number of classes: {num_classes}")
     print(f"  CLIP unfrozen layers: last {args.unfreeze_clip_layers} layers")
+    print(f"  Evidence: text={args.use_evidence_text}, image={args.use_evidence_image}")
+
+    # Determine if evidence is enabled (either text or image)
+    use_evidence = args.use_evidence_text or args.use_evidence_image
 
     model = MultimodalModel(
         num_classes=num_classes,
@@ -546,7 +579,7 @@ def main():
         image_model_name=args.image_model,
         num_fusion_layers=args.num_fusion_layers,
         num_heads=args.num_heads,
-        use_evidence=args.use_evidence,
+        use_evidence=use_evidence,
         caption_max_length=args.caption_max_length,
         dropout=args.dropout,
         unfreeze_clip_layers=args.unfreeze_clip_layers,
