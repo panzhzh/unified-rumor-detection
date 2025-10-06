@@ -18,6 +18,7 @@ from transformers import XLMRobertaTokenizer
 from tqdm import tqdm
 import json
 import yaml
+from datetime import datetime
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -394,9 +395,13 @@ def main():
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"\nUsing device: {device}")
 
-    # Create output directory
-    output_dir = Path(args.output_dir)
+    # Create output directory with dataset + language + timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    language_str = args.language if args.language else "all"
+    output_dirname = f"{args.dataset}_{language_str}_{timestamp}"
+    output_dir = Path("outputs") / output_dirname
     output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"\nOutput directory: {output_dir}")
 
     # Save args
     with open(output_dir / "args.json", "w") as f:
@@ -476,6 +481,7 @@ def main():
     best_val_metric = 0.0
     eval_metric_name = "f1"  # Evaluation metric (f1 = f1_macro by default)
     checkpoint_history = []  # Track saved checkpoints
+    patience_counter = 0  # Early stopping counter
 
     print(f"\n{'='*60}")
     print("Starting Training")
@@ -483,6 +489,7 @@ def main():
     print(f"Evaluation strategy: After each epoch")
     print(f"Evaluation metric: F1 (macro)")
     print(f"Checkpoint limit: Keep top 2 models")
+    print(f"Early stopping: Enabled (patience=3)")
     print(f"{'='*60}\n")
 
     for epoch in range(args.num_epochs):
@@ -510,6 +517,7 @@ def main():
 
         if current_metric > best_val_metric:
             best_val_metric = current_metric
+            patience_counter = 0  # Reset early stopping counter
 
             # Create checkpoint
             checkpoint_path = output_dir / f"checkpoint_epoch{epoch+1}_f1{current_metric:.4f}.pt"
@@ -541,7 +549,13 @@ def main():
 
             print(f"✓ Saved checkpoint (F1: {current_metric:.4f}) - Rank: 1/{len(checkpoint_history)}")
         else:
-            print(f"  No improvement (Best F1: {best_val_metric:.4f})")
+            patience_counter += 1
+            print(f"  No improvement (Best F1: {best_val_metric:.4f}) - Patience: {patience_counter}/3")
+
+            # Early stopping
+            if patience_counter >= 3:
+                print(f"\n⚠ Early stopping triggered after {epoch + 1} epochs (no improvement for 3 epochs)")
+                break
 
     # Test on best model
     print(f"\n{'='*60}")

@@ -101,6 +101,10 @@ experiment:
   eval_steps: 500  # Only used if eval_strategy="steps"
   eval_metric: "f1"  # Metric to select best model (f1 = macro F1)
 
+  # Early stopping
+  early_stopping: true  # Enable early stopping
+  patience: 3  # Stop if no improvement for N epochs
+
   # Checkpointing settings
   save_strategy: "epoch"  # Options: "epoch" (save after each epoch), "steps" (save every N steps)
   save_steps: 500  # Only used if save_strategy="steps"
