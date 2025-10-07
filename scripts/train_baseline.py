@@ -9,16 +9,26 @@ import os
 import sys
 from pathlib import Path
 import random
+import warnings
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 from transformers import XLMRobertaTokenizer
+from transformers.utils import logging as hf_logging
 from tqdm import tqdm
 import json
 import yaml
 from datetime import datetime
+
+
+# Quiet lengthy sequence warnings from transformers tokenizers
+hf_logging.set_verbosity_error()
+warnings.filterwarnings(
+    "ignore",
+    message=r"Token indices sequence length is longer than the specified maximum sequence length"
+)
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -154,6 +164,16 @@ def create_data_filter(language=None, exclude_unverified=False):
 def create_collate_fn(model, tokenizer, device, use_evidence_text=True, use_evidence_image=True):
     """Create custom collate function for evidence processing"""
 
+    evidence_transform = None
+    if use_evidence_image:
+        from torchvision import transforms
+
+        evidence_transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
     def collate_fn(batch):
         """Process batch with evidence filtering and text re-tokenization"""
         # Extract fields
@@ -172,14 +192,17 @@ def create_collate_fn(model, tokenizer, device, use_evidence_text=True, use_evid
 
             # Select top-5 evidence if available and enabled
             if evidence_list and caption and (use_evidence_text or use_evidence_image):
-                selected_evidence = select_top_evidence(
-                    caption=caption,
-                    evidence_list=evidence_list,
-                    text_encoder=model.text_encoder,
-                    tokenizer=tokenizer,
-                    device=device,
-                    max_evidence=5
-                )
+                if device.type == 'cuda':
+                    selected_evidence = evidence_list[:5]
+                else:
+                    selected_evidence = select_top_evidence(
+                        caption=caption,
+                        evidence_list=evidence_list,
+                        text_encoder=model.text_encoder,
+                        tokenizer=tokenizer,
+                        device=device,
+                        max_evidence=5
+                    )
 
                 # Format text with evidence (only if use_evidence_text is True)
                 if use_evidence_text:
@@ -204,15 +227,9 @@ def create_collate_fn(model, tokenizer, device, use_evidence_text=True, use_evid
 
                 # Load evidence images (only if use_evidence_image is True)
                 if use_evidence_image:
-                    from torchvision import transforms
-                    transform = transforms.Compose([
-                        transforms.Resize((224, 224)),
-                        transforms.ToTensor(),
-                        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-                    ])
                     evi_imgs = load_evidence_images(
                         evidence_list=selected_evidence,
-                        image_transform=transform,
+                        image_transform=evidence_transform,
                         max_images=5
                     )
                     evidence_images_list.append(evi_imgs)

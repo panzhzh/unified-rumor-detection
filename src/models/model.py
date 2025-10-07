@@ -10,9 +10,7 @@ This model uses:
 
 import torch
 import torch.nn as nn
-from transformers import XLMRobertaTokenizer
 
-from .encoders import TextEncoder, ImageEncoder
 from .encoders import TextEncoder, ImageEncoder
 from .attention import DeepFusionLayer, EvidenceAttentionPooling
 
@@ -131,75 +129,80 @@ class MultimodalModel(nn.Module):
         batch_size = input_ids.shape[0]
 
         # Encode text (with evidence text already concatenated)
-        text_hidden, text_cls = self.text_encoder(input_ids, attention_mask)
+        text_hidden, _ = self.text_encoder(input_ids, attention_mask)
         text_hidden = self.text_projection(text_hidden)
-        # text_hidden: [batch_size, seq_len, hidden_dim]
-        # text_cls: [batch_size, hidden_dim]
+        text_cls = text_hidden[:, 0, :]  # CLS token after projection
 
-        # Encode main image
-        main_image_hidden, main_image_cls = self.image_encoder(pixel_values)
+        # Encode main image (keep patch tokens)
+        main_image_hidden, _ = self.image_encoder(pixel_values)
         main_image_hidden = self.image_projection(main_image_hidden)
-        # main_image_hidden: [batch_size, num_patches, hidden_dim]
+        main_cls = main_image_hidden[:, 0, :]
+        main_patches = main_image_hidden[:, 1:, :]
+
+        # Prepare image token sequence (start with CLS-like token)
+        image_hidden = torch.cat([main_cls.unsqueeze(1), main_patches], dim=1)
 
         # Process evidence images if available
         if self.use_evidence and evidence_pixel_values is not None and evidence_pixel_values.shape[1] > 0:
-            # Encode evidence images
             num_evidence = evidence_pixel_values.shape[1]
+
+            # Encode evidence images
             evi_flat = evidence_pixel_values.view(batch_size * num_evidence, 3, 224, 224)
-            evi_hidden, evi_cls = self.image_encoder(evi_flat)
+            evi_hidden, _ = self.image_encoder(evi_flat)
             evi_hidden = self.image_projection(evi_hidden)
-            evi_cls = evi_cls.view(batch_size, num_evidence, self.hidden_dim)
+            seq_len = evi_hidden.shape[1]
+            evi_hidden = evi_hidden.contiguous().view(batch_size, num_evidence, seq_len, self.hidden_dim)
+            evi_cls = evi_hidden[:, :, 0, :]
 
-            # Text-guided attention pooling
-            # α_i = softmax(w^T [v_i; t; v_i ⊙ t])
-            image_cls_all = torch.cat([main_image_cls.unsqueeze(1), evi_cls], dim=1)  # [batch, 1+num_evi, hidden]
-            text_cls_expanded = text_cls.unsqueeze(1).expand(-1, 1 + num_evidence, -1)  # [batch, 1+num_evi, hidden]
+            # Text-guided attention pooling over global CLS tokens
+            image_cls_all = torch.cat([main_cls.unsqueeze(1), evi_cls], dim=1)
+            text_cls_expanded = text_cls.unsqueeze(1).expand(-1, 1 + num_evidence, -1)
 
-            # Concatenate [v_i; t; v_i ⊙ t]
             attention_input = torch.cat([
                 image_cls_all,
                 text_cls_expanded,
                 image_cls_all * text_cls_expanded
-            ], dim=-1)  # [batch, 1+num_evi, hidden*3]
+            ], dim=-1)
 
-            # Compute attention scores
-            attention_logits = self.image_attention_fc(attention_input).squeeze(-1)  # [batch, 1+num_evi]
+            attention_logits = self.image_attention_fc(attention_input).squeeze(-1)
 
-            # Apply prior weights (main image has higher prior)
             prior_weights = torch.cat([
                 self.main_prior_weight.expand(batch_size, 1),
                 self.evidence_prior_weight.expand(batch_size, num_evidence)
-            ], dim=1)  # [batch, 1+num_evi]
+            ], dim=1)
 
             attention_logits = attention_logits + torch.log(prior_weights + 1e-8)
+            attention_weights = torch.softmax(attention_logits, dim=1)
 
-            # Softmax to get attention weights
-            attention_weights = torch.softmax(attention_logits, dim=1)  # [batch, 1+num_evi]
+            # Weighted CLS pooling for downstream classifier
+            image_cls_pooled = (attention_weights.unsqueeze(-1) * image_cls_all).sum(dim=1)
 
-            # Weighted pooling
-            image_cls_pooled = (attention_weights.unsqueeze(-1) * image_cls_all).sum(dim=1)  # [batch, hidden]
+            # Rebuild image token sequence: pooled token + weighted patches
+            main_weight = attention_weights[:, 0].unsqueeze(-1).unsqueeze(-1)
+            weighted_main = main_patches * main_weight
 
-            # Use pooled representation for fusion
-            image_hidden = image_cls_pooled.unsqueeze(1)  # [batch, 1, hidden] for fusion compatibility
+            evi_weights = attention_weights[:, 1:].unsqueeze(-1).unsqueeze(-1)
+            weighted_evi = (evi_hidden[:, :, 1:, :] * evi_weights).contiguous().view(batch_size, -1, self.hidden_dim)
 
+            image_hidden = torch.cat([
+                image_cls_pooled.unsqueeze(1),
+                weighted_main,
+                weighted_evi
+            ], dim=1)
         else:
-            # No evidence, use only main image
-            image_hidden = main_image_cls.unsqueeze(1)  # [batch, 1, hidden]
+            # No evidence: use main CLS as pooled representation
+            image_cls_pooled = main_cls
 
         # Cross-modal fusion
         for fusion_layer in self.fusion_layers:
             text_hidden, image_hidden = fusion_layer(text_hidden, image_hidden)
 
-        # Pool representations
-        text_pooled = text_hidden[:, 0, :]  # CLS token
-        image_pooled = image_hidden[:, 0, :]  # Pooled image
-
-        text_pooled = torch.tanh(self.text_pooler(text_pooled))
-        image_pooled = torch.tanh(self.image_pooler(image_pooled))
+        # Pool representations (use updated CLS tokens)
+        text_pooled = torch.tanh(self.text_pooler(text_hidden[:, 0, :]))
+        image_pooled = torch.tanh(self.image_pooler(image_hidden[:, 0, :]))
 
         # Concatenate and classify
         fused_features = torch.cat([text_pooled, image_pooled], dim=1)
         logits = self.classifier(fused_features)
 
         return logits
-

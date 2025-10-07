@@ -209,10 +209,13 @@ class MultimodalDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         item = self.data[idx]
 
-        # Process text
-        text = item.get_all_text() if self.use_ocr else item.text
+        # Process text (retain raw caption and optional OCR separately)
+        caption_text = item.text if item.has_text() else ''
+        ocr_text = item.ocr if item.has_ocr() else ''
+        combined_text = item.get_all_text() if self.use_ocr else caption_text
+
         encoded = self.text_tokenizer(
-            text,
+            combined_text,
             max_length=self.max_text_length,
             padding='max_length',
             truncation=True,
@@ -228,7 +231,11 @@ class MultimodalDataset(Dataset):
             'image': self.image_transform(image),
             'label': item.label,
             'id': item.id,
-            'dataset_name': item.dataset_name
+            'dataset_name': item.dataset_name,
+            'text': combined_text,
+            'caption': caption_text,
+            'ocr': ocr_text,
+            'evidence_list': item.evidence_list
         }
 
 
