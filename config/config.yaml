@@ -10,7 +10,7 @@ dataset:
   name: "MR2"  # Options: AMG, DGM4, FineFake, MMFakeBench, MR2
 
   # Language filter (for multilingual datasets like MR2)
-  language: zh  # Options: null (all), "en", "zh"
+  language: en  # Options: null (all), "en", "zh"
 
   # Label handling
   exclude_unverified: false  # For MR2: whether to exclude label=2 (unverified)
@@ -23,7 +23,7 @@ dataset:
 
   # Preprocessing
   max_text_length: 512
-  use_ocr: true  # Whether to include OCR text
+  use_ocr: false  # Whether to include OCR text
 
 # ============================================================================
 # Model Configuration
@@ -41,8 +41,8 @@ model:
   num_heads: 8  # Number of attention heads in fusion layers
 
   # Evidence fusion (advanced feature)
-  use_evidence_text: true  # Whether to use evidence text
-  use_evidence_image: true  # Whether to use evidence images
+  use_evidence_text: false  # Whether to use evidence text
+  use_evidence_image: false  # Whether to use evidence images
   caption_max_length: 128  # Max length for evidence captions
 
   # CLIP unfreezing strategy

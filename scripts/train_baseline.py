@@ -146,10 +146,17 @@ def parse_args():
 
 def create_data_filter(language=None, exclude_unverified=False):
     """Create data filter function"""
+    language_normalized = None
+    if language is not None:
+        if isinstance(language, str) and language.strip().lower() in {"all", "*", "any"}:
+            language_normalized = None
+        else:
+            language_normalized = language
+
     def filter_fn(item):
         # Language filter
-        if language is not None:
-            if item.language != language:
+        if language_normalized is not None:
+            if item.language != language_normalized:
                 return False
 
         # Exclude unverified (label=2)
@@ -192,9 +199,7 @@ def create_collate_fn(model, tokenizer, device, use_evidence_text=True, use_evid
 
             # Select top-5 evidence if available and enabled
             if evidence_list and caption and (use_evidence_text or use_evidence_image):
-                if device.type == 'cuda':
-                    selected_evidence = evidence_list[:5]
-                else:
+                try:
                     selected_evidence = select_top_evidence(
                         caption=caption,
                         evidence_list=evidence_list,
@@ -203,6 +208,11 @@ def create_collate_fn(model, tokenizer, device, use_evidence_text=True, use_evid
                         device=device,
                         max_evidence=5
                     )
+                except RuntimeError as exc:
+                    if "Cannot re-initialize CUDA" in str(exc) or "CUDA" in str(exc):
+                        selected_evidence = evidence_list[:5]
+                    else:
+                        raise
 
                 # Format text with evidence (only if use_evidence_text is True)
                 if use_evidence_text:
@@ -603,6 +613,12 @@ def main():
         hidden_dim=args.hidden_dim,
         classifier_hidden_dim=args.classifier_hidden_dim
     ).to(device)
+
+    # If using CUDA with evidence selection, keep dataloader single-process for safe tokenizer scoring
+    if device.type == 'cuda' and use_evidence and args.num_workers != 0:
+        print("\n⚠ Evidence selection requires single-process data loading on CUDA."
+              f" Overriding num_workers from {args.num_workers} to 0.")
+        args.num_workers = 0
 
     # Prepare dataloaders (needs model for collate_fn)
     train_loader, val_loader, test_loader, num_classes = prepare_dataloaders(args, tokenizer, model, device)
